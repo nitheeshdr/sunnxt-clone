@@ -134,3 +134,23 @@ export async function getSunnxtCookies(): Promise<string> {
 export function invalidateSession() {
   cachedCookies = "";
 }
+
+/**
+ * Full logout + fresh login.  Used when a roaming/geo error is detected so
+ * SunNXT re-evaluates the current IP and resets the roaming flag.
+ */
+export async function forceRelogin(): Promise<string> {
+  cachedCookies = "";
+  loginPromise = null;
+
+  // Tell SunNXT to invalidate the old session
+  try {
+    await fetch("https://www.sunnxt.com/next/api/logout", {
+      method: "POST",
+      headers: LOGIN_HEADERS,
+    });
+  } catch { /* ignore — logout is best-effort */ }
+
+  // Fresh login from current IP
+  return getSunnxtCookies();
+}

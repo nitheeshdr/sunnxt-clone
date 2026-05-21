@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import CryptoJS from "crypto-js";
-import { getSunnxtCookies, invalidateSession } from "@/lib/sunnxt-session";
+import { getSunnxtCookies, invalidateSession, forceRelogin } from "@/lib/sunnxt-session";
 
 const FIELDS = "contents,user/currentdata,images,generalInfo,subtitles,relatedCast,globalServiceName,globalServiceId,relatedMedia,videos,thumbnailSeekPreview";
 const MEDIA_KEY = "A3s68aORSgHs$71P";
@@ -72,31 +72,20 @@ export async function GET(
       try { data = decrypt(raw.response as string); } catch { data = raw; }
     }
 
-    // Roaming/geo-block: SunNXT returns a special error notification object.
-    // Don't retry — a fresh session won't help; it's an IP-level restriction.
-    const roamingError = getRoamingError(data);
-    if (roamingError) {
-      const r0 = (data.results as Array<Record<string, unknown>>)[0];
-      return NextResponse.json({
-        code: 451,
-        error: "geo_blocked",
-        title: r0.title,
-        message: `${r0.p1 || ""} ${r0.p2 || ""}`.trim(),
-        blocked_reason: r0.blocked_reason,
-      }, { status: 451 });
-    }
-
-    // SunNXT returns code:200 but empty videos when session is missing/expired.
-    // Treat 0 videos the same as 401 — force a fresh login and retry once.
+    // Roaming/stale-session check.
+    // If roaming error: do a full logout+login so SunNXT re-evaluates the
+    // current (Indian) IP and clears the roaming flag.
+    // Otherwise (401/403/empty-videos): just invalidate cache and re-login.
+    const isRoaming = getRoamingError(data) !== null;
     const needsRetry =
+      isRoaming ||
       data.code === 401 ||
       data.code === 403 ||
       (data.code === 200 && !hasVideos(data));
 
     if (needsRetry) {
-      invalidateSession();
       try {
-        cookieHeader = await getSunnxtCookies();
+        cookieHeader = isRoaming ? await forceRelogin() : await (invalidateSession(), getSunnxtCookies());
       } catch (e) {
         console.error("Re-login failed:", e);
         return NextResponse.json({ code: 401, error: "Session refresh failed" }, { status: 401 });
@@ -108,7 +97,7 @@ export async function GET(
         try { data = decrypt(raw.response as string); } catch { data = raw; }
       }
 
-      // Check roaming error again after retry
+      // If still roaming-blocked after fresh login, account needs attention
       const roamingError2 = getRoamingError(data);
       if (roamingError2) {
         const r0 = (data.results as Array<Record<string, unknown>>)[0];
