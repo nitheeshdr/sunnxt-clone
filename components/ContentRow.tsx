@@ -76,8 +76,8 @@ export default function ContentRow({ title, items, layout = "landscape", showVie
           className="flex gap-2 sm:gap-3 overflow-x-auto scrollbar-hide px-4 sm:px-8 pb-2 scroll-smooth"
           style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
-          {items.map((item) => (
-            <ContentCard key={item._id} item={item} layout={layout} size="md" />
+          {items.map((item, idx) => (
+            <ContentCard key={item._id} item={item} layout={layout} size="md" priority={idx < 4} />
           ))}
         </div>
       </div>

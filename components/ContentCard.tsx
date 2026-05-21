@@ -7,6 +7,7 @@ interface ContentCardProps {
   item: ContentItem;
   layout?: "landscape" | "portrait";
   size?: "sm" | "md" | "lg";
+  priority?: boolean;
 }
 
 function buildDetailHref(item: ContentItem): string {
@@ -24,7 +25,7 @@ function buildDetailHref(item: ContentItem): string {
   return `/${slug}/detail/${item._id}`;
 }
 
-export default function ContentCard({ item, layout = "landscape", size = "md" }: ContentCardProps) {
+export default function ContentCard({ item, layout = "landscape", size = "md", priority = false }: ContentCardProps) {
   const effectiveTitle = item.title || item.generalInfo?.title || "";
   const isLive = item.generalInfo?.type === "live";
   const href = buildDetailHref(item);
@@ -63,11 +64,13 @@ export default function ContentCard({ item, layout = "landscape", size = "md" }:
             alt={effectiveTitle || item.generalInfo?.type || "Content thumbnail"}
             fill
             unoptimized
+            priority={priority}
+            loading={priority ? "eager" : "lazy"}
             className="object-cover transition-transform duration-300 group-hover:scale-105"
             sizes="(max-width: 640px) 160px, 240px"
           />
         ) : (
-          <div className="absolute inset-0 bg-gradient-to-br from-gray-700 to-gray-900 flex items-center justify-center">
+          <div className="absolute inset-0 bg-linear-to-br from-gray-700 to-gray-900 flex items-center justify-center">
             <span className="text-gray-500 text-xs text-center px-2">{effectiveTitle}</span>
           </div>
         )}

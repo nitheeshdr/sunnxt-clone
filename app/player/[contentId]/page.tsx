@@ -134,6 +134,16 @@ export default function PlayerPage({ params }: Props) {
       setError(`Playback error [${detail?.code ?? "?"}]: ${detail?.message || "unknown"}`);
     });
 
+    // Proxy requests to CORS-blocked SunNXT domains through our server
+    const CORS_BLOCKED = ["livestream.sunnxt.com", "suntvvod1.sunnxt.com"];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    player.getNetworkingEngine().registerRequestFilter((_type: any, request: any) => {
+      const url: string = request.uris[0];
+      if (CORS_BLOCKED.some((h) => url.includes(h))) {
+        request.uris[0] = `/api/stream-proxy?url=${encodeURIComponent(url)}`;
+      }
+    });
+
     if (video.licenseUrl) {
       const proxyLicenseUrl = `/api/license?url=${encodeURIComponent(video.licenseUrl)}`;
       player.configure({

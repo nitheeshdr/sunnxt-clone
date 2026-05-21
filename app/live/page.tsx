@@ -28,8 +28,8 @@ export default async function LivePage() {
       {channels.length > 0 ? (
         <div className="px-4 sm:px-8 max-w-350 mx-auto pb-10">
           <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-2 sm:gap-3">
-            {channels.map((channel) => (
-              <ContentCard key={channel._id} item={channel} layout="portrait" size="sm" />
+            {channels.map((channel, idx) => (
+              <ContentCard key={channel._id} item={channel} layout="portrait" size="sm" priority={idx < 14} />
             ))}
           </div>
         </div>
