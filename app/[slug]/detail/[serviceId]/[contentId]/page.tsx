@@ -106,6 +106,7 @@ export default async function DetailPage({ params }: Props) {
             alt={item.generalInfo?.title || item.globalServiceName || item.title || ""}
             fill
             priority
+            loading="eager"
             unoptimized
             className="object-cover object-top"
           />
@@ -199,10 +200,10 @@ export default async function DetailPage({ params }: Props) {
           <div className="mt-10">
             <h2 className="text-white font-bold text-lg mb-4">Cast</h2>
             <div className="flex gap-4 overflow-x-auto scrollbar-hide pb-2">
-              {cast.slice(0, 12).map((member) => {
+              {cast.slice(0, 12).map((member, idx) => {
                 const castImg = getImageUrl(member.images, "squareimage", "hdpi");
                 return (
-                  <div key={member._id} className="shrink-0 text-center w-20">
+                  <div key={`${member._id}-${idx}`} className="shrink-0 text-center w-20">
                     <div className="relative w-16 h-16 mx-auto rounded-full overflow-hidden bg-gray-800 mb-2">
                       {castImg ? (
                         <Image src={castImg} alt={member.name} fill unoptimized className="object-cover" />

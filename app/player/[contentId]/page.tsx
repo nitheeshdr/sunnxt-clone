@@ -80,9 +80,24 @@ export default function PlayerPage({ params }: Props) {
         return;
       }
 
+      console.log("Player: all formats:", videos.map((v) => ({ format: v.format, hasLicense: !!v.licenseUrl, url: v.link })));
+      console.log("Player: chosen format:", chosen.format, chosen.link);
       await startPlayback(chosen, id);
-    } catch (e) {
-      console.error(e);
+    } catch (e: unknown) {
+      if (e && typeof e === "object" && "category" in e) {
+        const err = e as { code?: number; category?: number; severity?: number; data?: unknown[]; message?: string };
+        const d = Array.isArray(err.data) ? err.data : [];
+        console.error("Shaka load failed:", {
+          code: err.code,
+          category: err.category,
+          message: err.message,
+          url: d[0],
+          httpStatus: d[1],
+          responseText: typeof d[2] === "string" ? d[2].slice(0, 200) : d[2],
+        });
+      } else {
+        console.error("Load error:", e);
+      }
       setError("Failed to load stream.");
     } finally {
       setMediaLoading(false);

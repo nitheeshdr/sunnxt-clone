@@ -70,6 +70,7 @@ export default async function MovieDetailPage({ params }: Props) {
             alt={item.generalInfo?.title || item.globalServiceName || item.title || ""}
             fill
             priority
+            loading="eager"
             unoptimized
             className="object-cover object-top"
           />
@@ -161,10 +162,10 @@ export default async function MovieDetailPage({ params }: Props) {
           <div className="mt-6 sm:mt-10">
             <h2 className="text-white font-bold text-sm sm:text-lg mb-3 sm:mb-4">Cast</h2>
             <div className="flex gap-3 sm:gap-4 overflow-x-auto scrollbar-hide pb-2" style={{ scrollbarWidth: "none" }}>
-              {cast.slice(0, 12).map((member) => {
+              {cast.slice(0, 12).map((member, idx) => {
                 const castImg = getImageUrl(member.images, "squareimage", "hdpi");
                 return (
-                  <div key={member._id} className="shrink-0 text-center w-16 sm:w-20">
+                  <div key={`${member._id}-${idx}`} className="shrink-0 text-center w-16 sm:w-20">
                     <div className="relative w-12 h-12 sm:w-16 sm:h-16 mx-auto rounded-full overflow-hidden bg-gray-800 mb-1.5">
                       {castImg ? (
                         <Image src={castImg} alt={member.name} fill unoptimized className="object-cover" />

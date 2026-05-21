@@ -80,6 +80,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!upstream.ok) {
+      console.error(`stream-proxy: ${upstream.status} ${upstream.statusText} for ${url}`);
       return new NextResponse(null, { status: upstream.status });
     }
 
@@ -98,6 +99,7 @@ export async function GET(request: NextRequest) {
     if (isMpd) {
       const xml = await upstream.text();
       const rewritten = rewriteMpd(xml, url);
+      console.log(`stream-proxy: MPD rewrite for ${url.split("?")[0]}, injected BaseURL`);
       return new NextResponse(rewritten, {
         status: 200,
         headers: {
