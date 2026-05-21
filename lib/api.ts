@@ -126,9 +126,10 @@ export async function getSimilarContent(id: string) {
   );
 }
 
-export async function searchContent(query: string) {
+export async function searchContent(query: string, type?: string) {
+  const typeParam = type ? `&type=${encodeURIComponent(type)}` : "";
   return fetchApi<{ code: number; results: unknown[] }>(
-    `/content/v3/search/?fields=images,generalInfo,globalServiceId,publishingHouse,relatedCast,contents&level=dynamic&query=${encodeURIComponent(query)}&startIndex=1&count=30&searchFields=title&publishingHouseId=&languageFilters=`
+    `/content/v3/search/?fields=images,generalInfo,globalServiceId,publishingHouse,relatedCast,contents&level=dynamic&query=${encodeURIComponent(query)}&startIndex=1&count=30&searchFields=title&publishingHouseId=&languageFilters=${typeParam}`
   );
 }
 

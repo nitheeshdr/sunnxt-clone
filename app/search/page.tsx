@@ -6,25 +6,39 @@ import ContentCard from "@/components/ContentCard";
 import ContentRow from "@/components/ContentRow";
 import type { ContentItem } from "@/types";
 
+const CONTENT_TYPES = [
+  { label: "All",         value: "",            icon: "🎬" },
+  { label: "Movies",      value: "movie",       icon: "🎥" },
+  { label: "TV Shows",    value: "tvepisode",   icon: "📺" },
+  { label: "Comedy",      value: "comedy",      icon: "😂" },
+  { label: "Music",       value: "musicvideo",  icon: "🎵" },
+  { label: "Short Films", value: "shortfilm",   icon: "🎞️" },
+  { label: "Live TV",     value: "live",        icon: "📡" },
+];
+
 function SearchResults() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const q = searchParams.get("q") || "";
+  const typeParam = searchParams.get("type") || "";
 
   const [results, setResults] = useState<ContentItem[]>([]);
   const [trending, setTrending] = useState<ContentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState(q);
+  const [activeType, setActiveType] = useState(typeParam);
   const [hasSearched, setHasSearched] = useState(!!q);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const doSearch = useCallback(async (term: string) => {
+  const doSearch = useCallback(async (term: string, type: string) => {
     if (!term.trim()) return;
     setLoading(true);
     setHasSearched(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
+      const params = new URLSearchParams({ q: term });
+      if (type) params.set("type", type);
+      const res = await fetch(`/api/search?${params}`);
       const data = await res.json();
       setResults(data.results || []);
     } catch {
@@ -44,9 +58,19 @@ function SearchResults() {
   useEffect(() => {
     if (q) {
       setQuery(q);
-      doSearch(q);
+      setActiveType(typeParam);
+      doSearch(q, typeParam);
     }
-  }, [q, doSearch]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, typeParam]);
+
+  const pushSearch = (term: string, type: string) => {
+    const params = new URLSearchParams();
+    if (term) params.set("q", term);
+    if (type) params.set("type", type);
+    const qs = params.toString();
+    router.replace(qs ? `/search?${qs}` : "/search", { scroll: false });
+  };
 
   const handleChange = (val: string) => {
     setQuery(val);
@@ -54,42 +78,45 @@ function SearchResults() {
     if (!val.trim()) {
       setResults([]);
       setHasSearched(false);
+      pushSearch("", activeType);
       return;
     }
     debounceRef.current = setTimeout(() => {
-      router.replace(`/search?q=${encodeURIComponent(val.trim())}`, { scroll: false });
-      doSearch(val.trim());
+      pushSearch(val.trim(), activeType);
+      doSearch(val.trim(), activeType);
     }, 400);
+  };
+
+  const handleTypeChange = (type: string) => {
+    setActiveType(type);
+    if (query.trim()) {
+      pushSearch(query.trim(), type);
+      doSearch(query.trim(), type);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
-    router.push(`/search?q=${encodeURIComponent(query.trim())}`);
-    doSearch(query.trim());
+    pushSearch(query.trim(), activeType);
+    doSearch(query.trim(), activeType);
   };
 
   const clearSearch = () => {
     setQuery("");
     setResults([]);
     setHasSearched(false);
+    setActiveType("");
     router.replace("/search", { scroll: false });
     inputRef.current?.focus();
   };
 
-  // Derive category pills from trending
-  const categories = Array.from(
-    new Set(
-      trending
-        .map((t) => t.generalInfo?.category || t.generalInfo?.type)
-        .filter(Boolean)
-    )
-  ).slice(0, 10) as string[];
+  const typeLabel = CONTENT_TYPES.find((t) => t.value === activeType)?.label || "All";
 
   return (
     <div className="min-h-screen bg-[#0f0f0f] pb-16">
       {/* Search header */}
-      <div className="px-4 sm:px-8 pt-6 pb-4 max-w-350 mx-auto">
+      <div className="px-4 sm:px-8 pt-6 pb-3 max-w-350 mx-auto">
         <h1 className="text-xl sm:text-2xl font-black text-white mb-4">Search</h1>
 
         {/* Search bar */}
@@ -126,6 +153,24 @@ function SearchResults() {
             )}
           </div>
         </form>
+
+        {/* Type filter tabs */}
+        <div className="flex gap-2 mt-3 overflow-x-auto scrollbar-hide pb-1" style={{ scrollbarWidth: "none" }}>
+          {CONTENT_TYPES.map((t) => (
+            <button
+              key={t.value}
+              onClick={() => handleTypeChange(t.value)}
+              className={`shrink-0 flex items-center gap-1.5 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-xs sm:text-sm font-medium transition-all ${
+                activeType === t.value
+                  ? "bg-red-600 text-white shadow-lg shadow-red-900/40"
+                  : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-700"
+              }`}
+            >
+              <span className="text-sm">{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Loading */}
@@ -140,7 +185,7 @@ function SearchResults() {
       {!loading && hasSearched && results.length > 0 && (
         <div className="px-4 sm:px-8 max-w-350 mx-auto">
           <p className="text-gray-500 text-xs sm:text-sm mb-4">
-            {results.length} result{results.length !== 1 ? "s" : ""} for{" "}
+            {results.length} {typeLabel !== "All" ? typeLabel.toLowerCase() : "result"}{results.length !== 1 ? "s" : ""} for{" "}
             <span className="text-white font-medium">&ldquo;{q || query}&rdquo;</span>
           </p>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4">
@@ -157,39 +202,45 @@ function SearchResults() {
           <p className="text-4xl sm:text-6xl mb-4">🎬</p>
           <p className="text-gray-400 text-base sm:text-lg font-semibold">No results found</p>
           <p className="text-gray-600 text-xs sm:text-sm mt-2">
-            Try &ldquo;Vijay&rdquo;, &ldquo;KGF&rdquo; or &ldquo;Sun TV&rdquo;
+            Try searching in a different category
           </p>
         </div>
       )}
 
-      {/* Default state — trending + categories */}
+      {/* Default state — trending + browse categories */}
       {!hasSearched && !loading && (
         <>
-          {/* Category pills */}
-          {categories.length > 0 && (
-            <div className="px-4 sm:px-8 max-w-350 mx-auto mb-6">
-              <h2 className="text-white font-bold text-sm sm:text-base mb-3">Browse by Category</h2>
-              <div className="flex flex-wrap gap-2">
-                {categories.map((tag) => (
-                  <button
-                    key={tag}
-                    onClick={() => { setQuery(tag); handleChange(tag); }}
-                    className="bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-xs sm:text-sm px-3 sm:px-4 py-1.5 sm:py-2 rounded-full transition-colors capitalize border border-gray-700 hover:border-red-500"
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+          <div className="px-4 sm:px-8 max-w-350 mx-auto mb-2">
+            <h2 className="text-white font-bold text-sm sm:text-base mb-1">Browse by Type</h2>
+            <p className="text-gray-500 text-xs sm:text-sm">
+              Select a category above and search, or explore trending below
+            </p>
+          </div>
 
-          {/* Trending row — matches rest of app */}
+          {/* Type browse cards */}
+          <div className="px-4 sm:px-8 max-w-350 mx-auto mb-6">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-7 gap-2 sm:gap-3">
+              {CONTENT_TYPES.filter((t) => t.value).map((t) => (
+                <button
+                  key={t.value}
+                  onClick={() => {
+                    setActiveType(t.value);
+                    inputRef.current?.focus();
+                  }}
+                  className="flex flex-col items-center justify-center gap-2 p-4 sm:p-5 rounded-2xl bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-red-600 transition-all group"
+                >
+                  <span className="text-2xl sm:text-3xl">{t.icon}</span>
+                  <span className="text-gray-300 group-hover:text-white text-[11px] sm:text-xs font-medium text-center leading-tight">
+                    {t.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Trending row */}
           {trending.length > 0 && (
-            <ContentRow
-              title="Trending Now"
-              items={trending}
-              layout="landscape"
-            />
+            <ContentRow title="Trending Now" items={trending} layout="landscape" />
           )}
 
           {trending.length === 0 && (
