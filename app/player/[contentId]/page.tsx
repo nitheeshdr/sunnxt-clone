@@ -178,9 +178,51 @@ export default function PlayerPage({ params }: Props) {
       });
     }
 
-    await player.load(video.link);
+    // Build quality fallback list from the original URL.
+    // bw=empty → q=4 (SD) often has no file on Akamai CDN.
+    // Try the original URL first, then swap to HD/HQ variants.
+    const fallbacks = buildQualityFallbacks(video.link);
+    let loaded = false;
+    for (const url of fallbacks) {
+      try {
+        console.log("Player: trying", url.split("?")[0].split("/").pop());
+        await player.load(url);
+        loaded = true;
+        break;
+      } catch (e: unknown) {
+        const httpStatus = (e as { data?: unknown[] })?.data?.[1];
+        // Only continue fallback on 404 — other errors should surface immediately
+        if (httpStatus !== 404) throw e;
+        console.warn("Player: 404 for", url.split("?")[0].split("/").pop(), "— trying next quality");
+      }
+    }
+    if (!loaded) throw new Error("All quality variants returned 404");
     videoRef.current.play();
     startHeartbeat(id);
+  }
+
+  function buildQualityFallbacks(originalUrl: string): string[] {
+    const urls = [originalUrl];
+    const base = originalUrl.split("?")[0];
+    const qs = originalUrl.includes("?") ? originalUrl.slice(originalUrl.indexOf("?")) : "";
+
+    // e.g. 82850_est_sd.mpd → try _est_hd, _hd, _sd (without est), plain
+    const filename = base.split("/").pop() || "";
+    const dir = base.slice(0, base.lastIndexOf("/") + 1);
+
+    const variants = [
+      filename.replace(/_est_sd\.mpd/, "_est_hd.mpd"),
+      filename.replace(/_est_sd\.mpd/, "_hd.mpd"),
+      filename.replace(/_est_sd\.mpd/, "_sd.mpd"),
+      filename.replace(/_est_hd\.mpd/, "_hd.mpd"),
+      filename.replace(/_est_4k\.mpd/, "_4k.mpd"),
+    ].filter((v) => v && v !== filename);
+
+    for (const v of variants) {
+      const candidate = dir + v + qs;
+      if (!urls.includes(candidate)) urls.push(candidate);
+    }
+    return urls;
   }
 
   const backdropUrl = item

@@ -6,7 +6,9 @@ const FIELDS = "contents,user/currentdata,images,generalInfo,subtitles,relatedCa
 const MEDIA_KEY = "A3s68aORSgHs$71P";
 
 async function fetchMedia(contentId: string, cookieHeader: string) {
-  const url = `https://www.sunnxt.com/next/api/media/${contentId}?playbackCounter=1&fields=${FIELDS}`;
+  // bw=5000000 (5 Mbps) and nid=4 (WiFi) tell SunNXT to return HD/HQ CDN
+  // URLs instead of the default SD (q=4) which often has no file on Akamai.
+  const url = `https://www.sunnxt.com/next/api/media/${contentId}?playbackCounter=1&fields=${FIELDS}&bw=5000000&nid=4`;
   return fetch(url, {
     headers: {
       "x-myplex-platform": "browser",
