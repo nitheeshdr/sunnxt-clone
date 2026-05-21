@@ -39,6 +39,15 @@ function hasVideos(data: Record<string, unknown>): boolean {
   return (results?.[0]?.videos as { values?: unknown[] } | undefined)?.values?.length as unknown as boolean;
 }
 
+function getVideosError(data: Record<string, unknown>): string | null {
+  const results = data.results as Array<Record<string, unknown>> | undefined;
+  const videos = results?.[0]?.videos as Record<string, unknown> | undefined;
+  if (videos?.status && !videos?.values) {
+    return (videos.message as string) || "Video is not available";
+  }
+  return null;
+}
+
 function getRoamingError(data: Record<string, unknown>): string | null {
   const results = data.results as Array<Record<string, unknown>> | undefined;
   const r0 = results?.[0];
@@ -72,6 +81,12 @@ export async function GET(
     let data: Record<string, unknown> = raw;
     if (raw.response) {
       try { data = decrypt(raw.response as string); } catch { data = raw; }
+    }
+
+    // If videos is an error object (not a values array), return early — no retry needed.
+    const videosErr = getVideosError(data);
+    if (videosErr) {
+      return NextResponse.json({ code: 404, error: "video_unavailable", message: videosErr }, { status: 404 });
     }
 
     // Roaming/stale-session check.

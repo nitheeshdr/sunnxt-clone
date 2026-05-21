@@ -69,6 +69,11 @@ export default function PlayerPage({ params }: Props) {
         return;
       }
 
+      if (data.error === "video_unavailable") {
+        setError(data.message || "Video is not available for this content.");
+        return;
+      }
+
       if (data.code !== 200 || !data.results?.[0]?.videos?.values?.length) {
         setError("Stream unavailable.");
         return;
@@ -166,10 +171,12 @@ export default function PlayerPage({ params }: Props) {
       setError(`Playback error [${detail?.code ?? "?"}]: ${detail?.message || "unknown"}`);
     });
 
-    // Proxy requests to CORS-blocked / auth-required SunNXT domains
+    // Proxy requests to CORS-blocked / auth-required SunNXT domains.
+    // Skip already-proxied URLs to prevent double-proxying.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     player.getNetworkingEngine().registerRequestFilter((_type: any, request: any) => {
       const url: string = request.uris[0];
+      if (url.includes("/api/stream-proxy")) return;
       if (isSunnxtCdnUrl(url)) {
         request.uris[0] = `/api/stream-proxy?url=${encodeURIComponent(url)}`;
       }
@@ -190,12 +197,15 @@ export default function PlayerPage({ params }: Props) {
     // Build quality fallback list from the original URL.
     // bw=empty → q=4 (SD) often has no file on Akamai CDN.
     // Try the original URL first, then swap to HD/HQ variants.
+    // Pre-proxy SunNXT CDN manifest URLs so the initial fetch goes through
+    // our proxy (same path that makes live TV work).
     const fallbacks = buildQualityFallbacks(video.link);
     let loaded = false;
     for (const url of fallbacks) {
       try {
+        const loadUrl = isSunnxtCdnUrl(url) ? `/api/stream-proxy?url=${encodeURIComponent(url)}` : url;
         console.log("Player: trying", url.split("?")[0].split("/").pop());
-        await player.load(url);
+        await player.load(loadUrl);
         loaded = true;
         break;
       } catch (e: unknown) {
