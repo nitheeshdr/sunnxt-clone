@@ -75,33 +75,35 @@ export default function PlayerPage({ params }: Props) {
       }
 
       const videos: VideoEntry[] = data.results[0].videos.values;
-      // Prefer unencrypted DASH (no DRM — works on all mobile browsers).
-      // Fall back to DRM-encrypted DASH, then HLS, then first available.
+
+      // Build priority-ordered format list (deduplicated by URL).
+      // When DASH q=4 returns 404, the format fallback will try HLS next.
       const clearDash = videos.find((v) => v.format === "dash" && !v.licenseUrl);
       const cencDash = videos.find((v) => v.format?.includes("cenc") || (v.format?.includes("dash") && v.licenseUrl));
       const hlsVideo = videos.find((v) => v.format?.includes("hls") || v.link?.includes(".m3u8"));
-      const chosen = clearDash || cencDash || hlsVideo || videos[0];
+      const ordered = [clearDash, cencDash, hlsVideo, videos[0]]
+        .filter((v): v is VideoEntry => !!v)
+        .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i);
 
-      if (!chosen) {
-        setError("No playable stream found.");
-        return;
+      console.log("Player: formats available:", videos.map((v) => ({ format: v.format, url: v.link.split("?")[0] })));
+
+      let lastErr: unknown = null;
+      for (const video of ordered) {
+        try {
+          console.log("Player: trying format", video.format, video.link.split("?")[0].split("/").pop());
+          await startPlayback(video, id);
+          return; // success
+        } catch (e) {
+          lastErr = e;
+          console.warn("Player: format", video.format, "failed — trying next");
+        }
       }
-
-      console.log("Player: all formats:", videos.map((v) => ({ format: v.format, hasLicense: !!v.licenseUrl, url: v.link })));
-      console.log("Player: chosen format:", chosen.format, chosen.link);
-      await startPlayback(chosen, id);
+      throw lastErr ?? new Error("No playable stream found.");
     } catch (e: unknown) {
       if (e && typeof e === "object" && "category" in e) {
-        const err = e as { code?: number; category?: number; severity?: number; data?: unknown[]; message?: string };
+        const err = e as { code?: number; category?: number; data?: unknown[] };
         const d = Array.isArray(err.data) ? err.data : [];
-        console.error("Shaka load failed:", {
-          code: err.code,
-          category: err.category,
-          message: err.message,
-          url: d[0],
-          httpStatus: d[1],
-          responseText: typeof d[2] === "string" ? d[2].slice(0, 200) : d[2],
-        });
+        console.error("Shaka load failed:", { code: err.code, category: err.category, url: d[0], httpStatus: d[1] });
       } else {
         console.error("Load error:", e);
       }
@@ -154,16 +156,13 @@ export default function PlayerPage({ params }: Props) {
     await player.attach(videoRef.current);
     playerRef.current = player;
 
+    // Only surface errors that happen DURING playback (not during the load
+    // phase — those are caught by the quality-fallback loop below).
+    let loadingDone = false;
     player.addEventListener("error", (event: Event) => {
+      if (!loadingDone) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const detail = (event as any).detail;
-      console.error("Shaka error:", {
-        code: detail?.code,
-        category: detail?.category,
-        severity: detail?.severity,
-        data: detail?.data,
-        message: detail?.message,
-      });
       setError(`Playback error [${detail?.code ?? "?"}]: ${detail?.message || "unknown"}`);
     });
 
@@ -207,6 +206,7 @@ export default function PlayerPage({ params }: Props) {
       }
     }
     if (!loaded) throw new Error("All quality variants returned 404");
+    loadingDone = true;
     videoRef.current.play();
     startHeartbeat(id);
   }
