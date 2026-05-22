@@ -151,19 +151,36 @@ sunnxt-clone/
 
 ## Learning Guides
 
-Follow these in order to understand how everything works:
+Follow these in order to understand how everything works — platform internals first, security deep-dives second:
+
+### Platform Internals
 
 | # | Guide | What You'll Learn |
 |---|---|---|
-| 01 | [Project Overview](docs/01-overview.md) | Goals, scope, tech decisions |
-| 02 | [System Architecture](docs/02-architecture.md) | Request flow, why the proxy exists |
-| 03 | [API & Encryption](docs/03-api-encryption.md) | SunNXT API endpoints, AES-CBC encryption |
-| 04 | [Session & Auth](docs/04-session-auth.md) | Login flow, cookie cache, device-limit bypass |
-| 05 | [CORS Proxy & Manifests](docs/05-cors-proxy.md) | Stream proxy, DASH/HLS manifest rewriting |
-| 06 | [Video Player Pipeline](docs/06-video-player.md) | Shaka setup, format fallback, quality fallback |
-| 07 | [DRM Handling](docs/07-drm.md) | Widevine & PlayReady license proxy |
-| 08 | [Geo-block & Security](docs/08-geo-security.md) | Roaming detection, security findings |
-| 09 | [Deployment](docs/09-deployment.md) | Vercel config, Mumbai region, troubleshooting |
+| 01 | [Project Overview](docs/01-overview.md) | Goals, scope, why this was built |
+| 02 | [System Architecture](docs/02-architecture.md) | Request flow, 3-layer proxy model |
+| 03 | [API & Encryption](docs/03-api-encryption.md) | AES-CBC, static key, decrypt flow |
+| 04 | [Session & Auth](docs/04-session-auth.md) | Login, cookies, device-limit bypass |
+| 05 | [CORS Proxy & Manifests](docs/05-cors-proxy.md) | Stream proxy, DASH/HLS rewriting |
+| 06 | [Video Player Pipeline](docs/06-video-player.md) | Shaka, adaptive streaming, quality fallback |
+| 07 | [DRM Handling](docs/07-drm.md) | Widevine/PlayReady/FairPlay, 14 stream formats |
+| 08 | [Geo-block & Security](docs/08-geo-security.md) | Roaming detection, all 10 findings |
+| 09 | [Deployment](docs/09-deployment.md) | Vercel, Mumbai region, troubleshooting |
+
+### Security Deep Dives
+
+| # | Guide | What You'll Learn |
+|---|---|---|
+| 10 | [Vulnerability Deep Dive](docs/10-vulnerability-deep-dive.md) | Every vuln explained with PoC + fix |
+| 11 | [DRM Deep Dive](docs/11-drm-deep-dive.md) | EME API, PSSH, Nagravision, L1/L3 |
+| 12 | [Web Security Fundamentals](docs/12-api-security-fundamentals.md) | SOP, CORS, sessions, crypto basics |
+| 13 | [OWASP Top 10 Mapping](docs/13-owasp-top10-mapping.md) | Every finding mapped to OWASP 2021 |
+
+### Security Report
+
+| Document | Description |
+|---|---|
+| [SECURITY_REPORT.md](SECURITY_REPORT.md) | Full security assessment by Nitheesh D R — 10 findings with CVSS scores, PoC, and remediation |
 
 ---
 

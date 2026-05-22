@@ -48,6 +48,39 @@ function getVideosError(data: Record<string, unknown>): string | null {
   return null;
 }
 
+// Resolve relative stream URLs and propagate licenseUrl to Widevine DASH entries.
+function normalizeVideos(data: Record<string, unknown>): void {
+  const results = data.results as Array<Record<string, unknown>> | undefined;
+  const videos = results?.[0]?.videos as { values?: Array<Record<string, unknown>> } | undefined;
+  if (!videos?.values) return;
+
+  // Fix relative link URLs (hlsaes entries arrive without scheme+host)
+  videos.values = videos.values.map((v) => {
+    const link = v.link as string | undefined;
+    if (link && !link.startsWith("http") && !link.startsWith("/")) {
+      return { ...v, link: `https://suntvvod1.sunnxt.com/${link}` };
+    }
+    return v;
+  });
+
+  // Propagate licenseUrl from dash-cenc (Nagravision PlayReady/Widevine proxy)
+  // to format=dash (Akamai Widevine CENC) entries that have no licenseUrl.
+  // Only use dash-cenc licenseUrl — NOT hls-fp-aapl (FairPlay) which is a
+  // different license server that rejects Widevine challenges.
+  const dashCencLicenseUrl = videos.values.find(
+    (v) => v.format === "dash-cenc" && v.licenseUrl
+  )?.licenseUrl as string | undefined;
+
+  if (dashCencLicenseUrl) {
+    videos.values = videos.values.map((v) => {
+      if (!v.licenseUrl && v.format === "dash") {
+        return { ...v, licenseUrl: dashCencLicenseUrl };
+      }
+      return v;
+    });
+  }
+}
+
 function getRoamingError(data: Record<string, unknown>): string | null {
   const results = data.results as Array<Record<string, unknown>> | undefined;
   const r0 = results?.[0];
@@ -65,12 +98,19 @@ export async function GET(
   const browserCookie = request.headers.get("cookie") || "";
 
   let cookieHeader = browserCookie;
-  if (!cookieHeader.includes("sessionid")) {
+  const hasBrowserSession = cookieHeader.includes("sessionid");
+  if (!hasBrowserSession) {
     try {
       cookieHeader = await getSunnxtCookies();
     } catch {
-      // proceed without session
+      // No server credentials configured — user must be logged in via the login page
     }
+  }
+
+  // No session at all — tell the player to prompt login rather than loop retries
+  const hasSession = cookieHeader.includes("sessionid");
+  if (!hasSession) {
+    return NextResponse.json({ code: 401, error: "login_required", message: "Please log in to watch this content." }, { status: 401 });
   }
 
   try {
@@ -128,6 +168,7 @@ export async function GET(
       }
     }
 
+    normalizeVideos(data);
     return NextResponse.json(data);
   } catch {
     return NextResponse.json({ error: "Failed to fetch media" }, { status: 500 });

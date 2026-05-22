@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 type Step = "mobile" | "password";
@@ -17,6 +17,8 @@ export default function LoginPage() {
     subscription_status?: string;
   } | null>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const nextUrl = searchParams.get("next") || "/";
 
   const checkAccount = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,7 +57,7 @@ export default function LoginPage() {
       });
       const data = await res.json();
       if (data.success) {
-        router.push("/");
+        router.push(nextUrl);
         router.refresh();
       } else {
         setError(data.error || "Invalid credentials. Please try again.");

@@ -27,6 +27,8 @@ export default function PlayerPage({ params }: Props) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const playerRef = useRef<any>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const currentVideoRef = useRef<VideoEntry | null>(null);
+  const failedDrmLinksRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     params.then(({ contentId: id }) => {
@@ -69,6 +71,11 @@ export default function PlayerPage({ params }: Props) {
         return;
       }
 
+      if (data.error === "login_required" || data.code === 401) {
+        setError("login_required");
+        return;
+      }
+
       if (data.error === "video_unavailable") {
         setError(data.message || "Video is not available for this content.");
         return;
@@ -79,18 +86,24 @@ export default function PlayerPage({ params }: Props) {
         return;
       }
 
+      // media API normalizes videos: resolves relative URLs, propagates licenseUrl
       const videos: VideoEntry[] = data.results[0].videos.values;
 
-      // Build priority-ordered format list (deduplicated by URL).
-      // When DASH q=4 returns 404, the format fallback will try HLS next.
-      const clearDash = videos.find((v) => v.format === "dash" && !v.licenseUrl);
+      // Priority: Widevine DASH (Akamai, Chrome-compatible) → PlayReady DASH (suntvvod1, Edge-only)
+      // → HLS → first available.  Skip any format whose DRM already failed this session.
+      const widevineDash = videos.find((v) => v.format === "dash" && v.licenseUrl);
       const cencDash = videos.find((v) => v.format?.includes("cenc") || (v.format?.includes("dash") && v.licenseUrl));
       const hlsVideo = videos.find((v) => v.format?.includes("hls") || v.link?.includes(".m3u8"));
-      const ordered = [clearDash, cencDash, hlsVideo, videos[0]]
+      const ordered = [widevineDash, cencDash, hlsVideo, videos[0]]
         .filter((v): v is VideoEntry => !!v)
-        .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i);
+        .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i)
+        .filter((v) => !failedDrmLinksRef.current.has(v.link));
 
-      console.log("Player: formats available:", videos.map((v) => ({ format: v.format, url: v.link.split("?")[0] })));
+      console.log("Player: formats available:", videos.map((v) => ({
+        format: v.format,
+        hasLicense: !!v.licenseUrl,
+        url: v.link.split("?")[0].split("/").slice(-2).join("/"),
+      })));
 
       let lastErr: unknown = null;
       for (const video of ordered) {
@@ -108,11 +121,17 @@ export default function PlayerPage({ params }: Props) {
       if (e && typeof e === "object" && "category" in e) {
         const err = e as { code?: number; category?: number; data?: unknown[] };
         const d = Array.isArray(err.data) ? err.data : [];
+        const isDrm = err.category === 6 || ((err.code ?? 0) >= 6000 && (err.code ?? 0) < 7000);
         console.error("Shaka load failed:", { code: err.code, category: err.category, url: d[0], httpStatus: d[1] });
+        if (isDrm) {
+          setError(`DRM error [${err.code}]: Could not obtain a license. The content may require a subscription or a different DRM system.`);
+        } else {
+          setError("Failed to load stream.");
+        }
       } else {
         console.error("Load error:", e);
+        setError("Failed to load stream.");
       }
-      setError("Failed to load stream.");
     } finally {
       setMediaLoading(false);
     }
@@ -145,6 +164,7 @@ export default function PlayerPage({ params }: Props) {
 
   async function startPlayback(video: VideoEntry, id: string) {
     if (!videoRef.current) return;
+    currentVideoRef.current = video;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const shaka: any = await import("shaka-player");
@@ -168,7 +188,24 @@ export default function PlayerPage({ params }: Props) {
       if (!loadingDone) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const detail = (event as any).detail;
-      setError(`Playback error [${detail?.code ?? "?"}]: ${detail?.message || "unknown"}`);
+      const code: number = detail?.code ?? 0;
+      // Shaka error category 6 = DRM errors
+      const isDrm = detail?.category === 6 || (code >= 6000 && code < 7000);
+      console.error("Player runtime error:", { code, category: detail?.category, message: detail?.message });
+
+      if (isDrm && currentVideoRef.current) {
+        // Mark this format as DRM-failed and retry with the next format.
+        // 6008 = LICENSE_REQUEST_FAILED (Nagravision rejected the challenge).
+        console.warn(`DRM [${code}] on ${currentVideoRef.current.format} — trying next format`);
+        failedDrmLinksRef.current.add(currentVideoRef.current.link);
+        loadAndPlay(id);
+        return;
+      }
+
+      const msg = isDrm
+        ? `DRM error [${code}]: ${detail?.message || "License request failed"}`
+        : `Playback error [${code}]: ${detail?.message || "unknown"}`;
+      setError(msg);
     });
 
     // Proxy requests to CORS-blocked / auth-required SunNXT domains.
@@ -184,14 +221,18 @@ export default function PlayerPage({ params }: Props) {
 
     if (video.licenseUrl) {
       const proxyLicenseUrl = `/api/license?url=${encodeURIComponent(video.licenseUrl)}`;
+      // dash-cenc is PlayReady-only; format=dash and others need Widevine.
+      // Configure both so the browser picks whichever its CDM supports.
+      const isPlayReadyOnly = video.format === "dash-cenc";
       player.configure({
         drm: {
           servers: {
-            "com.widevine.alpha": proxyLicenseUrl,
+            ...(isPlayReadyOnly ? {} : { "com.widevine.alpha": proxyLicenseUrl }),
             "com.microsoft.playready": proxyLicenseUrl,
           },
         },
       });
+      console.log("Player: DRM configured for", video.format, "→", isPlayReadyOnly ? "PlayReady only" : "Widevine + PlayReady");
     }
 
     // Build quality fallback list from the original URL.
@@ -304,7 +345,24 @@ export default function PlayerPage({ params }: Props) {
         {/* Error overlay */}
         {error && !mediaLoading && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-black/80 px-6 text-center">
-            {isGeoBlocked ? (
+            {error === "login_required" ? (
+              <>
+                <svg className="w-14 h-14 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                <p className="text-white font-bold text-lg">Login Required</p>
+                <p className="text-gray-400 text-sm max-w-xs">Sign in with your SunNXT account to watch this content.</p>
+                <a
+                  href={`/login?next=/player/${contentId}`}
+                  className="mt-2 bg-red-600 hover:bg-red-700 text-white text-sm font-semibold px-8 py-2.5 rounded-full transition-colors"
+                >
+                  Sign In
+                </a>
+                <button onClick={() => history.back()} className="text-gray-500 text-xs hover:text-gray-300 mt-1">
+                  Go Back
+                </button>
+              </>
+            ) : isGeoBlocked ? (
               <>
                 <div className="text-5xl">🌍</div>
                 <p className="text-white font-bold text-base sm:text-lg">International Roaming Expired</p>
@@ -320,7 +378,7 @@ export default function PlayerPage({ params }: Props) {
               <>
                 <p className="text-yellow-400 text-sm max-w-md">{error}</p>
                 <button
-                  onClick={() => loadAndPlay(contentId)}
+                  onClick={() => { failedDrmLinksRef.current.clear(); loadAndPlay(contentId); }}
                   className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-6 py-2 rounded transition-colors"
                 >
                   Retry

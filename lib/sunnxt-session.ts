@@ -119,8 +119,16 @@ async function doLogin(): Promise<string> {
   throw new Error(`SunNXT login failed: code=${first.response.code} status=${first.response.status}`);
 }
 
-/** Returns a valid SunNXT session cookie string, logging in automatically if needed. */
+/**
+ * Returns a valid SunNXT session cookie string.
+ * Requires SUNNXT_USERID and SUNNXT_PASSWORD in .env.local.
+ * Throws if credentials are not configured — callers should catch and
+ * fall back to the browser-supplied session or proceed without auth.
+ */
 export async function getSunnxtCookies(): Promise<string> {
+  if (!process.env.SUNNXT_USERID || !process.env.SUNNXT_PASSWORD) {
+    throw new Error("SUNNXT credentials not configured — user session required");
+  }
   if (cachedCookies) return cachedCookies;
 
   // Deduplicate concurrent login attempts

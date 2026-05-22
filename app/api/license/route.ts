@@ -9,7 +9,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const cookie = await getSunnxtCookies();
+    // Prefer the browser's session cookie; fall back to the server credential session.
+    // Nagravision validates the SunNXT session alongside the JWT in the URL.
+    const browserCookie = request.headers.get("cookie") || "";
+    let cookie = browserCookie;
+    if (!cookie.includes("sessionid")) {
+      cookie = await getSunnxtCookies().catch(() => browserCookie);
+    }
+
     const challenge = await request.arrayBuffer();
 
     const res = await fetch(licenseUrl, {
@@ -18,14 +25,17 @@ export async function POST(request: NextRequest) {
         ...DEFAULT_HEADERS,
         cookie,
         "content-type": "application/octet-stream",
+        "x-forwarded-for": request.headers.get("x-forwarded-for") || "",
       },
       body: challenge,
       cache: "no-store",
     });
 
     if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`License server ${res.status} for ${licenseUrl.split("?")[0]}:`, body.slice(0, 200));
       return NextResponse.json(
-        { error: `DRM license server responded with ${res.status}` },
+        { error: `DRM license server responded with ${res.status}`, detail: body.slice(0, 200) },
         { status: res.status }
       );
     }

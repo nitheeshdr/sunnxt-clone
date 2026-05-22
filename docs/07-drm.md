@@ -6,177 +6,262 @@
 
 ## What Is DRM?
 
-DRM (Digital Rights Management) prevents users from downloading or recording premium video content. SunNXT uses **Widevine** (Google, used on Chrome/Android) and **PlayReady** (Microsoft, used on Edge/Windows) to encrypt video streams.
+DRM (Digital Rights Management) prevents users from downloading or recording premium video content. Without a valid license, encrypted video segments are just random bytes — the player cannot decode them.
 
-Without a valid license, an encrypted video segment is just random bytes — the player can't decode it.
+SunNXT uses a **multi-DRM architecture** via **Nagravision** (Kudelski Group) supporting three DRM systems simultaneously:
+
+| DRM System | Used On | Browser/OS |
+|---|---|---|
+| **Widevine** | Chrome, Firefox, Android | Google CDM |
+| **PlayReady** | Edge, Internet Explorer | Microsoft CDM |
+| **FairPlay** | Safari, iOS, macOS | Apple CDM |
 
 ---
 
-## How Widevine Works (Simplified)
+## How DRM Works — Step by Step
 
 ```
-1. Shaka loads encrypted MPD
-        ↓
-2. Shaka detects encryption → needs a license
-        ↓
-3. Shaka generates a "challenge" (binary blob with device info)
-        ↓
-4. Shaka POST challenge to license server URL
-        ↓
-5. License server verifies → returns license (binary blob)
-        ↓
-6. Shaka uses license to decrypt segments → video plays
+1. Shaka loads encrypted DASH manifest (.mpd)
+          ↓
+2. Shaka reads <ContentProtection> element
+          ↓
+   <ContentProtection schemeIdUri="urn:uuid:edef8ba9-...">  ← Widevine UUID
+     <cenc:pssh>AAAA...base64...</cenc:pssh>               ← PSSH box
+   </ContentProtection>
+          ↓
+3. Browser's CDM (e.g. Widevine) generates a "license challenge"
+   (binary blob containing device info + content key request)
+          ↓
+4. Shaka POSTs challenge to license server URL
+          ↓
+5. License server validates:
+   - Is this a real Widevine device?
+   - Does the JWT token match a valid account?
+   - Is the subscription active?
+          ↓
+6. License server returns a signed license (binary blob)
+          ↓
+7. CDM uses license to derive the content decryption key
+          ↓
+8. Segments are decrypted inside the CDM black-box
+          ↓
+9. Decoded frames go to the video element → video plays
 ```
 
-The challenge is typically `Content-Type: application/octet-stream`. The license response is also binary.
+---
+
+## The PSSH Box
+
+The PSSH (Protection System Specific Header) is a binary structure embedded in the MPD and in the encrypted stream's initialization segment. It contains:
+
+- **System ID** (UUID identifying the DRM system)
+- **KID** (Key Identifier — which encryption key to request)
+- **Custom data** (system-specific parameters)
+
+Widevine's UUID: `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`
+PlayReady's UUID: `9a04f079-9840-4286-ab92-e65be0885f95`
+
+```xml
+<!-- From a SunNXT DASH manifest (Widevine CENC) -->
+<ContentProtection
+  schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"
+  value="Widevine">
+  <cenc:pssh>AAAATHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAAEQIARIQjNrM...</cenc:pssh>
+</ContentProtection>
+```
+
+---
+
+## SunNXT's 14 Stream Formats (Enumerated)
+
+For a single premium movie (content ID 82850), the media API returns 14 stream entries:
+
+| # | Format Label | CDN | DRM System | CDN Access Without Session |
+|---|---|---|---|---|
+| 1 | `dash-cenc` HD | suntvvod1.sunnxt.com | PlayReady | ✓ (200 OK) |
+| 2 | `hls-fp-aapl` HD | suntvvod1.sunnxt.com | FairPlay | ✓ (200 OK) |
+| 3 | `wvm` 1080p | Akamai | Widevine Classic | ✓ (200 OK) |
+| 4 | `wvm` 720p | Akamai | Widevine Classic | ✓ (200 OK) |
+| 5 | `wvm` 480p | Akamai | Widevine Classic | ✓ (200 OK) |
+| 6 | `wvm` 360p | Akamai | Widevine Classic | ✓ (200 OK) |
+| 7 | `hlsaes` Low | suntvvod1.sunnxt.com | AES-128 | ✗ (403) |
+| 8 | `dash` HD | Akamai | Widevine CENC | ✓ (200 OK) |
+| 9 | `dash` HD alt | Akamai | Widevine CENC | ✓ (200 OK) |
+| 10–14 | `dash` SD variants | Akamai | Widevine CENC | ✓ (200 OK) |
+
+**Key insight:** CDN segments are accessible without a session cookie — **but ALL premium content is encrypted**. Having the URL is not enough. You still need a DRM license to decrypt.
 
 ---
 
 ## The Problem: License Server Requires Auth
 
-SunNXT's Widevine license server requires the same session cookie as all other API requests:
+SunNXT's Widevine license server is behind authentication:
 
 ```
-POST https://license.sunnxt.com/...
+POST https://api.sunnxt.com/licenseproxy/v3/nagravisionDRMProxy/?content_id=82850&token=<JWT>
 Cookie: sessionid=abc123...    ← required
+Content-Type: application/octet-stream
 Body: <binary widevine challenge>
 ```
 
-Shaka makes this request from the **browser**, which can't include HttpOnly session cookies in cross-origin requests.
+**Two problems for a browser:**
+1. The license URL is on a **different domain** (`api.sunnxt.com`) — CORS blocks it
+2. The `sessionid` cookie is `HttpOnly` — JavaScript cannot read it and include it in cross-origin requests
 
 ---
 
 ## The Solution: License Proxy
 
-`app/api/license/route.ts` is a thin proxy that injects the auth cookie:
+`app/api/license/route.ts` is a thin Next.js server-side proxy:
 
 ```
-Browser (Shaka)
-  │ POST /api/license?url=<encoded-license-url>
-  │ Body: <binary widevine challenge>
-  ▼
+Browser (Shaka Player)
+  │
+  │  POST /api/license?url=https%3A%2F%2Fapi.sunnxt.com%2F...
+  │  Body: <binary Widevine challenge>
+  │  (same-origin — no CORS issue)
+  ↓
+Next.js Server (api/license/route.ts)
+  │
+  │  Attach SunNXT session cookie from server-side session store
+  │  POST https://api.sunnxt.com/licenseproxy/v3/nagravisionDRMProxy/...
+  │  Body: <binary challenge forwarded unchanged>
+  ↓
+Nagravision License Server
+  │
+  │  Validates JWT (content_id, userId, ip_address, expiry, maxUses)
+  │  Checks session cookie → subscription status
+  │  Returns binary license
+  ↓
 Next.js Server
-  │ Attach SunNXT session cookie
-  │ POST <sunnxt-license-url>
-  │ Body: <binary widevine challenge> (forwarded as-is)
-  ▼
-SunNXT License Server
-  │ Validates session + challenge
-  │ Returns binary license
-  ▼
-Next.js Server
-  │ Forwards binary response unchanged
-  ▼
+  │  Forwards binary response unchanged
+  ↓
 Browser (Shaka)
-  └─ Uses license to decrypt video ✓
+  └─ CDM uses license to decrypt video ✓
 ```
 
 ---
 
-## Configuring DRM in the Player
+## Nagravision JWT Structure
 
-When a video entry has a `licenseUrl`, DRM is configured before calling `player.load()`:
+Every DRM license URL includes a signed JWT token in the query string:
+
+```json
+{
+  "content_id": "82850",
+  "maxUses": 2,
+  "device": "web",
+  "userId": "2750313",
+  "expiryTime": 1779436600,
+  "ip_address": "157.51.128.36",
+  "video_format": "dash-cenc"
+}
+```
+
+**Security observations:**
+
+| Field | Observation | Security Note |
+|---|---|---|
+| `ip_address` | Set to the **server's IP**, not the end-user browser IP | IP binding is ineffective for browser clients (VULN-08) |
+| `maxUses: 2` | Can be used twice | JWT can be shared within the validity window |
+| `expiryTime` | ~2 hour window | Short-lived, which is good |
+| `video_format` | Nagravision validates this matches the DRM challenge | Widevine challenge rejected if JWT says `dash-cenc` |
+
+---
+
+## DRM Format Selection in the Player
+
+```typescript
+// Priority order (Chrome prefers Widevine, Edge prefers PlayReady)
+const widevineDash = videos.find((v) => v.format === "dash" && v.licenseUrl);   // Akamai Widevine
+const cencDash     = videos.find((v) => v.format?.includes("cenc"));             // suntvvod1 PlayReady
+const hlsVideo     = videos.find((v) => v.format?.includes("hls"));              // FairPlay/AES-128
+
+const ordered = [widevineDash, cencDash, hlsVideo, videos[0]]
+  .filter(Boolean)
+  .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i) // dedupe
+  .filter((v) => !failedDrmLinksRef.current.has(v.link)); // skip DRM-failed
+```
+
+When DRM fails after `player.load()` (Shaka error category 6), the player automatically skips to the next format:
+
+```typescript
+if (isDrm && currentVideoRef.current) {
+  failedDrmLinksRef.current.add(currentVideoRef.current.link);
+  loadAndPlay(id); // retry with next format
+}
+```
+
+---
+
+## Configuring DRM in Shaka
 
 ```typescript
 if (video.licenseUrl) {
-  // Route license requests through our proxy instead of directly to SunNXT
   const proxyLicenseUrl = `/api/license?url=${encodeURIComponent(video.licenseUrl)}`;
+
+  // dash-cenc is PlayReady-only (suntvvod1.sunnxt.com CDN)
+  // All other DRM formats try Widevine first (Chrome/Android compatible)
+  const isPlayReadyOnly = video.format === "dash-cenc";
 
   player.configure({
     drm: {
       servers: {
-        "com.widevine.alpha":    proxyLicenseUrl,  // Chrome, Android, Firefox
-        "com.microsoft.playready": proxyLicenseUrl, // Edge, Windows
+        ...(isPlayReadyOnly ? {} : { "com.widevine.alpha": proxyLicenseUrl }),
+        "com.microsoft.playready": proxyLicenseUrl,
       },
     },
   });
 }
 ```
 
-The same proxy URL handles both DRM systems — the license proxy forwards whatever challenge binary Shaka sends and returns whatever license binary the server responds with.
-
 ---
 
-## Identifying Encrypted vs Clear Streams
+## Widevine Security Levels
 
-In the format selection code:
+Widevine has three security levels that affect what content quality the license server will grant:
 
-```typescript
-// Clear DASH (no DRM) — preferred
-const clearDash = videos.find((v) => v.format === "dash" && !v.licenseUrl);
+| Level | Where It Runs | Content Quality Cap | Notes |
+|---|---|---|---|
+| **L1** | Hardware TEE (phone, Smart TV) | Up to 4K | Keys never leave hardware |
+| **L2** | Software + hardware crypto | Up to 1080p | Partial hardware protection |
+| **L3** | Pure software (most desktop browsers) | SD/720p usually | Keys in software — theoretical extraction risk |
 
-// CENC-encrypted DASH (requires DRM)
-const cencDash = videos.find((v) =>
-  v.format?.includes("cenc") ||          // "dashcenc", "cenc"
-  (v.format?.includes("dash") && v.licenseUrl) // dash with licenseUrl
-);
-```
-
-`clearDash` is tried first because it avoids the DRM overhead and is compatible with all browsers. CENC-encrypted DASH is a fallback for content that requires DRM enforcement.
+Desktop Chrome uses **Widevine L3**. This means:
+- SunNXT's license server may cap HD content to 720p or 480p on desktop
+- The license server decides the quality — our proxy just relays the challenge
+- Mobile devices with L1 Widevine can receive 1080p/4K licenses
 
 ---
 
 ## What Is CENC?
 
-CENC (Common Encryption) is the ISO standard for encrypting MPEG-DASH content. The `.mpd` manifest declares the encryption method:
+CENC (Common Encryption) is the ISO 23001-7 standard for encrypting MPEG-DASH streams. It allows one encrypted stream to work with multiple DRM systems using the same encryption keys.
 
-```xml
-<ContentProtection
-  schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
-  value="Widevine">
-  <cenc:pssh>...</cenc:pssh>
-</ContentProtection>
+```
+                 ┌─────────────────────────────┐
+                 │     Single Encrypted Stream  │
+                 │  (AES-128-CTR or AES-128-CBC) │
+                 └──────────┬──────────────────┘
+                            │ Same content key
+              ┌─────────────┼──────────────┐
+              ↓             ↓              ↓
+       Widevine PSSH   PlayReady PSSH  FairPlay
+       (Chrome, FF)    (Edge, IE)      (Safari)
 ```
 
-The `pssh` (Protection System Specific Header) contains the key ID and encryption parameters Shaka uses to build the Widevine challenge.
+In the MPD, each DRM system has its own `<ContentProtection>` element with its own PSSH. The actual video segments are encrypted once — different DRM systems just have different ways of requesting the same decryption key.
 
 ---
 
-## Does This Actually Work?
+## Why DRM Cannot Be Bypassed in the Browser
 
-Widevine has three security levels:
+1. **The CDM is a black box** — Widevine runs as a browser plugin that JavaScript cannot inspect
+2. **Keys never touch JavaScript** — decryption happens inside the CDM, not in JS memory
+3. **Output Protection** — the CDM checks for HDCP on connected displays before providing keys for premium content
+4. **Hardware L1** — on phones, keys are stored in a hardware-isolated Trusted Execution Environment
 
-| Level | Where | Can be used? |
-|---|---|---|
-| L1 | Hardware TEE (phones, Smart TVs) | Yes, up to 1080p |
-| L2 | Software + hardware hybrid | Yes |
-| L3 | Software only (most desktop browsers) | Yes, usually SD/720p only |
-
-Most desktop browsers use **Widevine L3**, which means HD content may be downgraded to SD by the license server even with a valid license. SunNXT's license server determines the quality cap — our proxy just forwards the binary challenge without modification.
-
----
-
-## License Proxy Implementation
-
-```typescript
-// app/api/license/route.ts (simplified)
-export async function POST(request: NextRequest) {
-  const url = request.nextUrl.searchParams.get("url");
-  if (!url) return new NextResponse("Missing url", { status: 400 });
-
-  const cookie = await getSunnxtCookies().catch(() => "");
-  const challenge = await request.arrayBuffer(); // Read binary challenge
-
-  const upstream = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/octet-stream",
-      ...(cookie ? { cookie } : {}),
-    },
-    body: challenge,
-  });
-
-  return new NextResponse(upstream.body, {
-    status: upstream.status,
-    headers: {
-      "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
-      "access-control-allow-origin": "*",
-    },
-  });
-}
-```
-
-The binary challenge and binary license response are both forwarded without decoding — the proxy doesn't need to understand the DRM protocol, just relay it with auth.
+The only known practical Widevine bypass (L3 key extraction) requires deep OS-level access and custom tooling — it is not possible from a web browser context.
 
 ---
 
