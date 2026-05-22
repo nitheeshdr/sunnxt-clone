@@ -3,7 +3,7 @@
  *
  * Two independent mechanisms that together allow playback without a subscription:
  *
- * 1. UUID database — Maps content IDs to their internal CDN path UUID.
+ * 1. UUID database — Maps content IDs to their internal CDN path UUID + CDN pattern.
  *    The UUID is the only piece of data not available from public endpoints.
  *    Populated from HAR analysis; grows as more sessions are observed.
  *
@@ -24,21 +24,45 @@ export interface VideoEntry {
 }
 
 // ---------------------------------------------------------------------------
-// UUID database  (contentId → Akamai CDN path UUID)
-// Sourced from HAR analysis of network traffic with a subscribed account.
+// UUID database — maps contentId to CDN path info
+//
+// CDN patterns observed via HAR analysis:
+//  movies1-suntvvod: /movies/{uuid}/{contentId}/hd/{contentId}_hd.mpd  (with quality subdir)
+//  movies2-suntvvod: /movies2/{uuid}/{contentId}/{contentId}_hd.mpd     (no quality subdir)
+//  DD variants always use no quality subdir regardless of main CDN pattern.
 // ---------------------------------------------------------------------------
-const UUID_DB: Record<string, string> = {
-  "115249": "f38231600b68e429d44dff546f96b29e",  // "The Cricketer"
-  "82850":  "2a0b194b81d4071cf41ccfeb69d690e2",  // "96"
-  "251833": "5bfb2a0404ec10ba52cb2d072c64cbf4",  // "Sathi Leelavathi"
-};
-
-/** Register a newly discovered uuid so subsequent requests can use it. */
-export function registerContentUuid(contentId: string, uuid: string): void {
-  UUID_DB[contentId] = uuid;
+interface CdnEntry {
+  uuid: string;
+  // Base URL up to and including the /movies or /movies2 prefix
+  // e.g. "https://movies1-suntvvod.akamaized.net/movies"
+  cdnBase: string;
+  // True when the standard CDN puts hd/sd in a subdirectory before the filename
+  hasQualitySubdir: boolean;
 }
 
-export function getContentUuid(contentId: string): string | null {
+const UUID_DB: Record<string, CdnEntry> = {
+  "115249": {
+    uuid: "f38231600b68e429d44dff546f96b29e",
+    cdnBase: "https://movies1-suntvvod.akamaized.net/movies",
+    hasQualitySubdir: true,
+  },
+  "82850": {
+    uuid: "2a0b194b81d4071cf41ccfeb69d690e2",
+    cdnBase: "https://movies1-suntvvod.akamaized.net/movies",
+    hasQualitySubdir: true,
+  },
+  "251833": {
+    uuid: "5bfb2a0404ec10ba52cb2d072c64cbf4",
+    cdnBase: "https://movies2-suntvvod.akamaized.net/movies2",
+    hasQualitySubdir: false,
+  },
+};
+
+function registerContentEntry(contentId: string, entry: CdnEntry): void {
+  UUID_DB[contentId] = entry;
+}
+
+function getContentEntry(contentId: string): CdnEntry | null {
   return UUID_DB[contentId] ?? null;
 }
 
@@ -90,13 +114,10 @@ function getHdntl(): string | null {
  * Returns null if:
  * - The content UUID is not in the database, OR
  * - No valid hdntl token is cached (MPD manifests need hdntl; segments don't)
- *
- * The returned entries have NO licenseUrl — the player will use the
- * modularLicense endpoint (no subscription check) via the license proxy.
  */
 export function buildBypassEntries(contentId: string): VideoEntry[] | null {
-  const uuid = getContentUuid(contentId);
-  if (!uuid) {
+  const entry = getContentEntry(contentId);
+  if (!entry) {
     console.log(`cdn-bypass: no UUID for content ${contentId}`);
     return null;
   }
@@ -107,40 +128,66 @@ export function buildBypassEntries(contentId: string): VideoEntry[] | null {
     return null;
   }
 
+  const { uuid, cdnBase, hasQualitySubdir } = entry;
   const tok = `hdntl=${encodeURIComponent(hdntl)}`;
-  const aka    = `https://movies1-suntvvod.akamaized.net/movies/${uuid}/${contentId}`;
-  const akaDD  = `https://movies1-suntvvod-dd.akamaized.net/movies/${uuid}/${contentId}`;
 
-  // Priority: HD first, then SD.  EST (EST encoded) variants last.
-  // No licenseUrl — the pwaapi modularLicense endpoint requires only the
-  // content_id query param (no subscription check confirmed via live testing).
-  // Set licenseUrl to the pwaapi modularLicense endpoint directly.
-  // The license proxy extracts content_id from this URL and calls pwaapi —
-  // no subscription check (VULN-11). Without licenseUrl the player strips
-  // ContentProtection from the MPD and gets no DRM keys.
+  // Derive the DD (download/EST) CDN base from the main CDN base by inserting -dd
+  // e.g. movies1-suntvvod → movies1-suntvvod-dd
+  const cdnBaseDD = cdnBase.replace("-suntvvod.", "-suntvvod-dd.");
+
+  const base    = `${cdnBase}/${uuid}/${contentId}`;
+  const baseDD  = `${cdnBaseDD}/${uuid}/${contentId}`;
+
+  // licenseUrl → pwaapi modularLicense (no subscription check — VULN-11).
+  // Without this, the player strips ContentProtection from the MPD entirely,
+  // which causes playback failure for Widevine-encrypted streams.
   const licenseUrl = `https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=${contentId}`;
 
+  const hdLink = hasQualitySubdir
+    ? `${base}/hd/${contentId}_hd.mpd?${tok}`
+    : `${base}/${contentId}_hd.mpd?${tok}`;
+  const sdLink = hasQualitySubdir
+    ? `${base}/sd/${contentId}_sd.mpd?${tok}`
+    : `${base}/${contentId}_sd.mpd?${tok}`;
+
   const entries: VideoEntry[] = [
-    { format: "dash", profile: "High", link: `${aka}/hd/${contentId}_hd.mpd?${tok}`,      licenseUrl },
-    { format: "dash", profile: "Low",  link: `${aka}/sd/${contentId}_sd.mpd?${tok}`,      licenseUrl },
-    { format: "dash", profile: "High", link: `${akaDD}/${contentId}_est_hd.mpd?${tok}`,   licenseUrl },
-    { format: "dash", profile: "Low",  link: `${akaDD}/${contentId}_est_sd.mpd?${tok}`,   licenseUrl },
+    { format: "dash", profile: "High", link: hdLink,                                         licenseUrl },
+    { format: "dash", profile: "Low",  link: sdLink,                                         licenseUrl },
+    { format: "dash", profile: "High", link: `${baseDD}/${contentId}_est_hd.mpd?${tok}`,     licenseUrl },
+    { format: "dash", profile: "Low",  link: `${baseDD}/${contentId}_est_sd.mpd?${tok}`,     licenseUrl },
   ];
 
-  console.log(`cdn-bypass: built ${entries.length} bypass entries for content ${contentId} uuid=${uuid.slice(0, 8)}...`);
+  console.log(`cdn-bypass: built ${entries.length} bypass entries for content ${contentId} uuid=${uuid.slice(0, 8)}... cdnBase=${cdnBase}`);
   return entries;
 }
 
 /**
- * Scan a media API result and register any newly seen content UUIDs
+ * Scan a media API result and register any newly seen content UUIDs + CDN patterns
  * so they can be used for future bypass attempts.
+ *
+ * URL pattern (HAR-derived):
+ *   movies1: https://movies1-suntvvod.akamaized.net/movies/{uuid}/{contentId}/hd/{id}_hd.mpd
+ *   movies2: https://movies2-suntvvod.akamaized.net/movies2/{uuid}/{contentId}/{id}_hd.mpd
  */
 export function learnUuidsFromEntries(contentId: string, entries: VideoEntry[]): void {
+  if (UUID_DB[contentId]) return; // already known
+
   for (const v of entries) {
-    const m = v.link.match(/movies\/([a-f0-9]{32})\/(\d+)\//);
-    if (m && m[2] === contentId && !UUID_DB[contentId]) {
-      registerContentUuid(contentId, m[1]);
-      console.log(`cdn-bypass: learned uuid for content ${contentId}: ${m[1]}`);
-    }
+    // Skip DD (download) CDN — DD hosts don't use quality subdirs; learn from main CDN only
+    if (v.link.includes("-suntvvod-dd.")) continue;
+
+    // Capture: (cdnBase) / (uuid) / (contentId) / (optional quality subdir) / (filename)
+    const m = v.link.match(
+      /^(https:\/\/movies\d*-suntvvod\.akamaized\.net\/movies2?)\/([a-f0-9]{32})\/(\d+)\/(hd\/|sd\/)?[\w.-]+\.mpd/
+    );
+    if (!m || m[3] !== contentId) continue;
+
+    const cdnBase = m[1];
+    const uuid = m[2];
+    const hasQualitySubdir = !!(m[4]); // group 4 is "hd/" or "sd/" or undefined
+
+    registerContentEntry(contentId, { uuid, cdnBase, hasQualitySubdir });
+    console.log(`cdn-bypass: learned uuid for content ${contentId}: ${uuid} cdnBase=${cdnBase} qualitySubdir=${hasQualitySubdir}`);
+    return;
   }
 }

@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getSunnxtCookies } from "@/lib/sunnxt-session";
 import { DEFAULT_HEADERS } from "@/lib/api";
+import { extractAndCacheHdntlFromUrl } from "@/lib/cdn-bypass";
 
 const ALLOWED_HOSTS = [
   "livestream.sunnxt.com",
@@ -167,6 +168,12 @@ export async function GET(request: NextRequest) {
 
     if (isMpd) {
       const xml = await upstream.text();
+      // Harvest hdntl wildcard tokens embedded in SegmentTemplate URLs before rewriting.
+      // SunNXT MPDs embed hdntl (acl=/*, 24h TTL) in every segment template — this is
+      // the wildcard Akamai token needed for the CDN UUID bypass path.
+      const hdntlM = xml.match(/hdntl=([^"&\s]+)/);
+      if (hdntlM) extractAndCacheHdntlFromUrl(`https://cdn.sunnxt.com/?hdntl=${hdntlM[1]}`);
+
       let rewritten = rewriteMpd(xml, url, licenseUrl);
       if (stripDrm) rewritten = stripContentProtection(rewritten);
       console.log(`stream-proxy: MPD rewrite for ${url.split("?")[0]}, injected BaseURL${licenseUrl ? " + Laurl" : ""}${stripDrm ? " + stripDRM" : ""}`);
