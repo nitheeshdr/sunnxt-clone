@@ -213,14 +213,9 @@ export default function PlayerPage({ params }: Props) {
 
       if (isDrm && currentVideoRef.current) {
         console.warn(`DRM [${code}] on ${currentVideoRef.current.format} — trying next format`);
-        if (code === 6008) {
-          // LICENSE_REQUEST_FAILED — license server rejected the challenge.
-          // The hdnea token changes with each media refetch so tracking by URL
-          // doesn't help; track by format so the entire format is skipped.
-          failedFormatsRef.current.add(currentVideoRef.current.format);
-        } else {
-          failedDrmLinksRef.current.add(currentVideoRef.current.link);
-        }
+        // Always track by format: hdnea tokens change on every media refetch so
+        // URL-based tracking never blocks the same stream on the next attempt.
+        failedFormatsRef.current.add(currentVideoRef.current.format);
         loadAndPlay(id);
         return;
       }
@@ -258,8 +253,10 @@ export default function PlayerPage({ params }: Props) {
     // fallback — using it triggers a license request → subscription rejection (6008).
     // Instead we strip ContentProtection from the MPD and attempt clear playback.
     const effectiveLicenseUrl = video.licenseUrl ?? (video.format !== "dash" ? fallbackLicenseUrl : null) ?? null;
+    // Pass contentId so the license proxy can try pwaapi modularLicense
+    // (no subscription check) before falling back to the api.sunnxt.com endpoint.
     const proxyLicenseUrl = effectiveLicenseUrl
-      ? `/api/license?url=${encodeURIComponent(effectiveLicenseUrl)}`
+      ? `/api/license?url=${encodeURIComponent(effectiveLicenseUrl)}&contentId=${encodeURIComponent(id)}`
       : null;
 
     if (proxyLicenseUrl) {
