@@ -206,8 +206,11 @@ export default function PlayerPage({ params }: Props) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const detail = (event as any).detail;
       const code: number = detail?.code ?? 0;
-      // Shaka error category 6 = DRM errors
-      const isDrm = detail?.category === 6 || (code >= 6000 && code < 7000);
+      // Shaka error category 6 = DRM errors.
+      // 4012 = RESTRICTIONS_CANNOT_BE_MET — all stream variants filtered after an
+      // invalid DRM key status (e.g. CDM rejected modularLicense response). Treat
+      // as format failure so the player moves on to the next format.
+      const isDrm = detail?.category === 6 || (code >= 6000 && code < 7000) || code === 4012;
       const errData = Array.isArray(detail?.data) ? detail.data : [];
       console.error("Player runtime error:", { code, category: detail?.category, message: detail?.message, url: errData[0], httpStatus: errData[1] });
 
@@ -249,10 +252,19 @@ export default function PlayerPage({ params }: Props) {
       }
     });
 
-    // For genuinely-clear DASH streams (no licenseUrl from API) we don't use the
-    // fallback — using it triggers a license request → subscription rejection (6008).
-    // Instead we strip ContentProtection from the MPD and attempt clear playback.
-    const effectiveLicenseUrl = video.licenseUrl ?? (video.format !== "dash" ? fallbackLicenseUrl : null) ?? null;
+    // Akamai CDN format=dash entries omit licenseUrl in the API response but the
+    // segments are Widevine-encrypted (PSSH box in init.mp4). We need a license
+    // server — prefer the API's fallbackLicenseUrl (nagravisionDRMProxy with a
+    // subscribed-session JWT) when available; fall back to modularLicense otherwise.
+    const isAkamaiDash = video.format === "dash" && !video.licenseUrl && isSunnxtCdnUrl(video.link);
+    const inferredLicenseUrl = isAkamaiDash
+      ? (fallbackLicenseUrl ?? `https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=${id}`)
+      : null;
+    const effectiveLicenseUrl =
+      video.licenseUrl ??
+      inferredLicenseUrl ??
+      (video.format !== "dash" ? fallbackLicenseUrl : null) ??
+      null;
     // Pass contentId so the license proxy can try pwaapi modularLicense
     // (no subscription check) before falling back to the api.sunnxt.com endpoint.
     const proxyLicenseUrl = effectiveLicenseUrl
@@ -285,11 +297,11 @@ export default function PlayerPage({ params }: Props) {
           video.format === "dash" && proxyLicenseUrl
             ? `&licenseUrl=${encodeURIComponent(proxyLicenseUrl)}`
             : "";
-        // For unencrypted DASH (no licenseUrl), strip ContentProtection from the MPD
-        // so Shaka never initiates a license request.  If segments are truly clear,
-        // playback succeeds without any subscription.
+        // Only strip ContentProtection for non-CDN dash streams that have no license
+        // at all. Akamai CDN segments always carry Widevine encryption (PSSH in
+        // init.mp4) so stripping the MPD's ContentProtection only causes 6010.
         const stripDrmParam =
-          video.format === "dash" && !video.licenseUrl ? "&stripDrm=true" : "";
+          video.format === "dash" && !video.licenseUrl && !isAkamaiDash ? "&stripDrm=true" : "";
         const loadUrl = isSunnxtCdnUrl(url)
           ? `/api/stream-proxy?url=${encodeURIComponent(url)}${licenseParam}${stripDrmParam}`
           : url;

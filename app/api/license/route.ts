@@ -41,12 +41,21 @@ export async function POST(request: NextRequest) {
     if (pwaapiUrl) {
       const r = await post(pwaapiUrl);
       if (r.ok) {
-        console.log(`License: pwaapi bypass succeeded for content_id=${contentId || "?"}`);
-        return new NextResponse(await r.arrayBuffer(), {
-          headers: { "content-type": "application/octet-stream" },
-        });
+        const data = await r.arrayBuffer();
+        // Valid Widevine licenses are binary protobuf. If the first byte is 0x7B ({)
+        // the response is JSON (an error body), not a license — fall through.
+        const firstByte = data.byteLength > 0 ? new Uint8Array(data)[0] : 0;
+        const isJson = firstByte === 0x7B || r.headers.get("content-type")?.includes("json");
+        if (!isJson) {
+          console.log(`License: pwaapi bypass succeeded for content_id=${contentId || "?"}`);
+          return new NextResponse(data, {
+            headers: { "content-type": "application/octet-stream" },
+          });
+        }
+        console.warn(`License: modularLicense returned JSON/error for content_id=${contentId || "?"}, falling back`);
+      } else {
+        console.warn(`License: pwaapi returned ${r.status}, falling back to original URL`);
       }
-      console.warn(`License: pwaapi returned ${r.status}, falling back to original URL`);
     }
 
     // 2. Fall back to original license URL (api.sunnxt.com/nagravision)

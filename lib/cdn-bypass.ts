@@ -13,7 +13,20 @@
  *
  * Chain: uuid + hdntl → MPD (403 without hdntl) + open segments (always 200)
  *        + modularLicense (no sub check) → full playback
+ *
+ * Token persistence:
+ *   The hdntl token is saved to OS temp dir so it survives server restarts.
+ *   On startup, the token is loaded from (in priority order):
+ *     1. SUNNXT_HDNTL env var (set in .env.local — never committed)
+ *     2. Disk cache at $TMPDIR/sunnxt-hdntl.json
+ *   To refresh the token: update SUNNXT_HDNTL in .env.local and restart.
+ *   The token is also automatically refreshed whenever a successful CDN
+ *   response embeds a new hdntl value (e.g. via stream-proxy MPD processing).
  */
+
+import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 export interface VideoEntry {
   link: string;
@@ -67,7 +80,7 @@ function getContentEntry(contentId: string): CdnEntry | null {
 }
 
 // ---------------------------------------------------------------------------
-// hdntl wildcard token cache
+// hdntl wildcard token cache + persistence
 // ---------------------------------------------------------------------------
 interface HdntlCache {
   value: string;      // raw token string, e.g. "exp=...~acl=/*~hmac=..."
@@ -76,20 +89,51 @@ interface HdntlCache {
 
 let hdntlCache: HdntlCache | null = null;
 
+const CACHE_FILE = join(tmpdir(), "sunnxt-hdntl.json");
+
+function saveCacheToDisk(cache: HdntlCache): void {
+  try {
+    writeFileSync(CACHE_FILE, JSON.stringify(cache), "utf8");
+  } catch { /* non-fatal */ }
+}
+
+function loadCacheFromDisk(): HdntlCache | null {
+  try {
+    const raw = readFileSync(CACHE_FILE, "utf8");
+    const c = JSON.parse(raw) as HdntlCache;
+    return Date.now() < c.expiresAt ? c : null;
+  } catch { return null; }
+}
+
+function seedFromToken(token: string, source: string): boolean {
+  const expM = token.match(/exp=(\d+)/);
+  if (!expM) return false;
+  const expiresAt = parseInt(expM[1]) * 1000;
+  if (Date.now() >= expiresAt) return false;
+  hdntlCache = { value: token, expiresAt };
+  saveCacheToDisk(hdntlCache);
+  console.log(`cdn-bypass: hdntl seeded from ${source}, expires ${new Date(expiresAt).toISOString()}`);
+  return true;
+}
+
+// Seed on module load: env var first, then disk.
+(function initHdntlCache() {
+  const envToken = process.env.SUNNXT_HDNTL;
+  if (envToken && seedFromToken(envToken, "SUNNXT_HDNTL env")) return;
+  const disk = loadCacheFromDisk();
+  if (disk) {
+    hdntlCache = disk;
+    console.log(`cdn-bypass: hdntl loaded from disk, expires ${new Date(disk.expiresAt).toISOString()}`);
+  }
+})();
+
 /** Extract hdntl from any list of video entry URLs and cache it. */
 export function extractAndCacheHdntl(entries: VideoEntry[]): void {
   for (const v of entries) {
     const m = v.link.match(/[?&]hdntl=([^&\s]+)/);
     if (!m) continue;
     const token = decodeURIComponent(m[1]);
-    const expM = token.match(/exp=(\d+)/);
-    if (!expM) continue;
-    const expiresAt = parseInt(expM[1]) * 1000;
-    if (Date.now() < expiresAt) {
-      hdntlCache = { value: token, expiresAt };
-      console.log(`cdn-bypass: cached hdntl token, expires ${new Date(expiresAt).toISOString()}`);
-      return;
-    }
+    if (seedFromToken(token, "video entry URL")) return;
   }
 }
 
