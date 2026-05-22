@@ -4,6 +4,7 @@ import { getSunnxtCookies, invalidateSession, forceRelogin } from "@/lib/sunnxt-
 
 const FIELDS = "contents,user/currentdata,images,generalInfo,subtitles,relatedCast,globalServiceName,globalServiceId,relatedMedia,videos,thumbnailSeekPreview";
 const MEDIA_KEY = "A3s68aORSgHs$71P";
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 async function fetchMedia(contentId: string, cookieHeader: string) {
   // bw=5000000 (5 Mbps) and nid=4 (WiFi) tell SunNXT to return HD/HQ CDN
@@ -15,7 +16,28 @@ async function fetchMedia(contentId: string, cookieHeader: string) {
       "x-ucv": "5",
       origin: "https://www.sunnxt.com",
       referer: "https://www.sunnxt.com/",
-      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+      "user-agent": UA,
+      cookie: cookieHeader,
+    },
+    cache: "no-store",
+  });
+}
+
+// Fallback: call pwaapi contentDetail directly with videos in fields.
+// This endpoint bypasses the subscription gate in www.sunnxt.com/next/api/media/
+// and may return stream URLs for content the media API rejects with "subscribe".
+async function fetchMediaViaContentDetail(contentId: string, cookieHeader: string) {
+  const fields = "contents,user/currentdata,images,generalInfo,subtitles,relatedCast,globalServiceName,globalServiceId,relatedMedia,videos,thumbnailSeekPreview";
+  const url = `https://pwaapi.sunnxt.com/content/v3/contentDetail/${contentId}/?level=devicemax&fields=${fields}&bw=5000000&nid=4&playbackCounter=1`;
+  return fetch(url, {
+    headers: {
+      "x-myplex-platform": "browser",
+      "x-ucv": "5",
+      contentlanguage: "tamil,telugu,malayalam,kannada,hindi,bengali,marathi,english",
+      origin: "https://www.sunnxt.com",
+      referer: "https://www.sunnxt.com/",
+      "user-agent": UA,
+      accept: "*/*",
       cookie: cookieHeader,
     },
     cache: "no-store",
@@ -63,22 +85,6 @@ function normalizeVideos(data: Record<string, unknown>): void {
     return v;
   });
 
-  // Propagate licenseUrl from dash-cenc (Nagravision PlayReady/Widevine proxy)
-  // to format=dash (Akamai Widevine CENC) entries that have no licenseUrl.
-  // Only use dash-cenc licenseUrl — NOT hls-fp-aapl (FairPlay) which is a
-  // different license server that rejects Widevine challenges.
-  const dashCencLicenseUrl = videos.values.find(
-    (v) => v.format === "dash-cenc" && v.licenseUrl
-  )?.licenseUrl as string | undefined;
-
-  if (dashCencLicenseUrl) {
-    videos.values = videos.values.map((v) => {
-      if (!v.licenseUrl && v.format === "dash") {
-        return { ...v, licenseUrl: dashCencLicenseUrl };
-      }
-      return v;
-    });
-  }
 }
 
 function getRoamingError(data: Record<string, unknown>): string | null {
@@ -123,9 +129,30 @@ export async function GET(
       try { data = decrypt(raw.response as string); } catch { data = raw; }
     }
 
-    // If videos is an error object (not a values array), return early — no retry needed.
+    // If videos is an error object (not a values array), attempt the pwaapi
+    // contentDetail bypass before giving up.  The www.sunnxt.com/next/api/media/
+    // endpoint enforces subscription in the Next.js layer; calling pwaapi directly
+    // may return stream URLs without that check.
     const videosErr = getVideosError(data);
     if (videosErr) {
+      console.log(`media/${contentId}: subscription gate hit, trying pwaapi contentDetail bypass`);
+      try {
+        const bypassRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
+        const bypassRaw = await bypassRes.json() as Record<string, unknown>;
+        let bypassData: Record<string, unknown> = bypassRaw;
+        if (bypassRaw.response) {
+          try { bypassData = decrypt(bypassRaw.response as string); } catch { bypassData = bypassRaw; }
+        }
+        if (hasVideos(bypassData)) {
+          console.log(`media/${contentId}: bypass succeeded via contentDetail`);
+          normalizeVideos(bypassData);
+          return NextResponse.json(bypassData);
+        }
+        const bypassErr = getVideosError(bypassData);
+        console.log(`media/${contentId}: bypass returned:`, bypassErr || bypassData.code);
+      } catch (e) {
+        console.error(`media/${contentId}: bypass attempt failed:`, e);
+      }
       return NextResponse.json({ code: 404, error: "video_unavailable", message: videosErr }, { status: 404 });
     }
 

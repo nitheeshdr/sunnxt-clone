@@ -29,6 +29,7 @@ export default function PlayerPage({ params }: Props) {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentVideoRef = useRef<VideoEntry | null>(null);
   const failedDrmLinksRef = useRef<Set<string>>(new Set());
+  const failedFormatsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     params.then(({ contentId: id }) => {
@@ -89,15 +90,31 @@ export default function PlayerPage({ params }: Props) {
       // media API normalizes videos: resolves relative URLs, propagates licenseUrl
       const videos: VideoEntry[] = data.results[0].videos.values;
 
-      // Priority: Widevine DASH (Akamai, Chrome-compatible) → PlayReady DASH (suntvvod1, Edge-only)
-      // → HLS → first available.  Skip any format whose DRM already failed this session.
+      // Priority:
+      //  1. Unencrypted DASH (format=dash, no licenseUrl) — Akamai CDN, no DRM needed
+      //  2. Widevine DASH (format=dash with licenseUrl) — requires Widevine CDM
+      //  3. PlayReady DASH (dash-cenc) — Edge/Windows only
+      //  4. HLS (any hls* format) — fallback
+      //  5. First available entry
+      // Skip any format whose stream URL already failed this session.
+      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+      const clearDash  = videos.find((v) => v.format === "dash" && !v.licenseUrl);
       const widevineDash = videos.find((v) => v.format === "dash" && v.licenseUrl);
-      const cencDash = videos.find((v) => v.format?.includes("cenc") || (v.format?.includes("dash") && v.licenseUrl));
-      const hlsVideo = videos.find((v) => v.format?.includes("hls") || v.link?.includes(".m3u8"));
-      const ordered = [widevineDash, cencDash, hlsVideo, videos[0]]
+      const cencDash = videos.find((v) => v.format === "dash-cenc" && v.licenseUrl);
+      const hlsVideo = videos.find((v) => v.format?.includes("hls") && v.format !== "hls-fp-aapl");
+      const ordered = [clearDash, widevineDash, cencDash, hlsVideo, videos[0]]
         .filter((v): v is VideoEntry => !!v)
         .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i)
-        .filter((v) => !failedDrmLinksRef.current.has(v.link));
+        .filter((v) => !failedDrmLinksRef.current.has(v.link))
+        .filter((v) => !failedFormatsRef.current.has(v.format))
+        .filter((v) => isSafari || v.format !== "hls-fp-aapl");
+
+      // Akamai DASH manifests include ContentProtection elements even for nominally
+      // unencrypted streams — Shaka throws 6012 (NO_LICENSE_SERVER_GIVEN) if no
+      // server is configured.  Pass the best available license URL as a fallback so
+      // clearDash (and any other format without its own licenseUrl) can still load.
+      const fallbackLicenseUrl =
+        videos.find((v) => v.licenseUrl)?.licenseUrl ?? null;
 
       console.log("Player: formats available:", videos.map((v) => ({
         format: v.format,
@@ -109,7 +126,7 @@ export default function PlayerPage({ params }: Props) {
       for (const video of ordered) {
         try {
           console.log("Player: trying format", video.format, video.link.split("?")[0].split("/").pop());
-          await startPlayback(video, id);
+          await startPlayback(video, id, fallbackLicenseUrl);
           return; // success
         } catch (e) {
           lastErr = e;
@@ -162,7 +179,7 @@ export default function PlayerPage({ params }: Props) {
     } catch { return false; }
   }
 
-  async function startPlayback(video: VideoEntry, id: string) {
+  async function startPlayback(video: VideoEntry, id: string, fallbackLicenseUrl?: string | null) {
     if (!videoRef.current) return;
     currentVideoRef.current = video;
 
@@ -191,13 +208,19 @@ export default function PlayerPage({ params }: Props) {
       const code: number = detail?.code ?? 0;
       // Shaka error category 6 = DRM errors
       const isDrm = detail?.category === 6 || (code >= 6000 && code < 7000);
-      console.error("Player runtime error:", { code, category: detail?.category, message: detail?.message });
+      const errData = Array.isArray(detail?.data) ? detail.data : [];
+      console.error("Player runtime error:", { code, category: detail?.category, message: detail?.message, url: errData[0], httpStatus: errData[1] });
 
       if (isDrm && currentVideoRef.current) {
-        // Mark this format as DRM-failed and retry with the next format.
-        // 6008 = LICENSE_REQUEST_FAILED (Nagravision rejected the challenge).
         console.warn(`DRM [${code}] on ${currentVideoRef.current.format} — trying next format`);
-        failedDrmLinksRef.current.add(currentVideoRef.current.link);
+        if (code === 6008) {
+          // LICENSE_REQUEST_FAILED — license server rejected the challenge.
+          // The hdnea token changes with each media refetch so tracking by URL
+          // doesn't help; track by format so the entire format is skipped.
+          failedFormatsRef.current.add(currentVideoRef.current.format);
+        } else {
+          failedDrmLinksRef.current.add(currentVideoRef.current.link);
+        }
         loadAndPlay(id);
         return;
       }
@@ -208,6 +231,14 @@ export default function PlayerPage({ params }: Props) {
       setError(msg);
     });
 
+    // Akamai EdgeAuth token (hdnea) from the manifest URL.
+    // DASH segment URLs are resolved from the MPD <BaseURL> which is the directory
+    // path only — query strings (including hdnea) are not inherited during relative
+    // URL resolution per RFC 3986.  We re-inject it into every CDN segment request
+    // so Akamai doesn't reject them with 403.
+    let hdnea: string | null = null;
+    try { hdnea = new URL(video.link).searchParams.get("hdnea"); } catch { /* no-op */ }
+
     // Proxy requests to CORS-blocked / auth-required SunNXT domains.
     // Skip already-proxied URLs to prevent double-proxying.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -215,36 +246,56 @@ export default function PlayerPage({ params }: Props) {
       const url: string = request.uris[0];
       if (url.includes("/api/stream-proxy")) return;
       if (isSunnxtCdnUrl(url)) {
-        request.uris[0] = `/api/stream-proxy?url=${encodeURIComponent(url)}`;
+        let cdnUrl = url;
+        if (hdnea && !cdnUrl.includes("hdnea=")) {
+          cdnUrl += (cdnUrl.includes("?") ? "&" : "?") + `hdnea=${encodeURIComponent(hdnea)}`;
+        }
+        request.uris[0] = `/api/stream-proxy?url=${encodeURIComponent(cdnUrl)}`;
       }
     });
 
-    if (video.licenseUrl) {
-      const proxyLicenseUrl = `/api/license?url=${encodeURIComponent(video.licenseUrl)}`;
-      // dash-cenc is PlayReady-only; format=dash and others need Widevine.
-      // Configure both so the browser picks whichever its CDM supports.
-      const isPlayReadyOnly = video.format === "dash-cenc";
+    // For genuinely-clear DASH streams (no licenseUrl from API) we don't use the
+    // fallback — using it triggers a license request → subscription rejection (6008).
+    // Instead we strip ContentProtection from the MPD and attempt clear playback.
+    const effectiveLicenseUrl = video.licenseUrl ?? (video.format !== "dash" ? fallbackLicenseUrl : null) ?? null;
+    const proxyLicenseUrl = effectiveLicenseUrl
+      ? `/api/license?url=${encodeURIComponent(effectiveLicenseUrl)}`
+      : null;
+
+    if (proxyLicenseUrl) {
+      // Configure both Widevine and PlayReady regardless of format — DASH manifests
+      // (including dash-cenc) typically list both ContentProtection schemes and
+      // Chrome will pick Widevine even for dash-cenc content.  Omitting Widevine
+      // here causes Shaka error 6012 on Chrome for any DASH manifest.
       player.configure({
         drm: {
           servers: {
-            ...(isPlayReadyOnly ? {} : { "com.widevine.alpha": proxyLicenseUrl }),
+            "com.widevine.alpha": proxyLicenseUrl,
             "com.microsoft.playready": proxyLicenseUrl,
           },
         },
       });
-      console.log("Player: DRM configured for", video.format, "→", isPlayReadyOnly ? "PlayReady only" : "Widevine + PlayReady");
+      console.log("Player: DRM configured for", video.format, "→ Widevine + PlayReady");
     }
 
-    // Build quality fallback list from the original URL.
-    // bw=empty → q=4 (SD) often has no file on Akamai CDN.
-    // Try the original URL first, then swap to HD/HQ variants.
-    // Pre-proxy SunNXT CDN manifest URLs so the initial fetch goes through
-    // our proxy (same path that makes live TV work).
     const fallbacks = buildQualityFallbacks(video.link);
     let loaded = false;
     for (const url of fallbacks) {
       try {
-        const loadUrl = isSunnxtCdnUrl(url) ? `/api/stream-proxy?url=${encodeURIComponent(url)}` : url;
+        // For Widevine DASH, pass the license URL so stream-proxy can inject
+        // <dashif:Laurl> into the MPD — fixes Shaka error 6012 on Akamai streams.
+        const licenseParam =
+          video.format === "dash" && proxyLicenseUrl
+            ? `&licenseUrl=${encodeURIComponent(proxyLicenseUrl)}`
+            : "";
+        // For unencrypted DASH (no licenseUrl), strip ContentProtection from the MPD
+        // so Shaka never initiates a license request.  If segments are truly clear,
+        // playback succeeds without any subscription.
+        const stripDrmParam =
+          video.format === "dash" && !video.licenseUrl ? "&stripDrm=true" : "";
+        const loadUrl = isSunnxtCdnUrl(url)
+          ? `/api/stream-proxy?url=${encodeURIComponent(url)}${licenseParam}${stripDrmParam}`
+          : url;
         console.log("Player: trying", url.split("?")[0].split("/").pop());
         await player.load(loadUrl);
         loaded = true;
@@ -378,7 +429,7 @@ export default function PlayerPage({ params }: Props) {
               <>
                 <p className="text-yellow-400 text-sm max-w-md">{error}</p>
                 <button
-                  onClick={() => { failedDrmLinksRef.current.clear(); loadAndPlay(contentId); }}
+                  onClick={() => { failedDrmLinksRef.current.clear(); failedFormatsRef.current.clear(); loadAndPlay(contentId); }}
                   className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-6 py-2 rounded transition-colors"
                 >
                   Retry
