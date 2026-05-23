@@ -294,11 +294,9 @@ export async function GET(
   if (wantMerge) {
     const ffmpegPath = await checkFfmpeg();
     if (!ffmpegPath) {
-      return NextResponse.json(
-        { error: "ffmpeg not found on server. Install ffmpeg to use merge download." },
-        { status: 503 }
-      );
-    }
+      // ffmpeg not on PATH — fall through to video-only fMP4 streaming below
+      console.warn(`Merge ${contentId}: ffmpeg not found, falling back to video-only`);
+    } else {
 
     const videoInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, "video");
     const audioInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, "audio");
@@ -387,7 +385,8 @@ export async function GET(
         "x-duration-sec": String(Math.round(videoInfo.durationSec)),
       },
     });
-  }
+    } // end else (ffmpegPath found)
+  } // end if (wantMerge)
 
   const segInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, track);
 
