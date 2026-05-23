@@ -185,21 +185,24 @@ export async function GET(
         return NextResponse.json(buildBypassResponse(contentId, blockedBypassEntries, {}));
       }
       // Try bypass 3 (pwaapi, different endpoint, often not rate-limited)
-      try {
-        const bRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
-        if (bRes.headers.get("content-type")?.includes("json")) {
-          const bRaw = await bRes.json() as Record<string, unknown>;
-          let bData: Record<string, unknown> = bRaw;
-          if (bRaw.response) { try { bData = decrypt(bRaw.response as string); } catch { bData = bRaw; } }
-          if (hasVideos(bData)) {
-            console.log(`media/${contentId}: pwaapi bypass succeeded (main session blocked)`);
-            harvestBypassData(contentId, bData);
-            normalizeVideos(bData);
-            return NextResponse.json(bData);
+      // Try with blocked session first, then without any session (pwaapi often works unauthenticated)
+      for (const pwaCookie of [cookieHeader, ""]) {
+        try {
+          const bRes = await fetchMediaViaContentDetail(contentId, pwaCookie);
+          if (bRes.headers.get("content-type")?.includes("json")) {
+            const bRaw = await bRes.json() as Record<string, unknown>;
+            let bData: Record<string, unknown> = bRaw;
+            if (bRaw.response) { try { bData = decrypt(bRaw.response as string); } catch { bData = bRaw; } }
+            if (hasVideos(bData)) {
+              console.log(`media/${contentId}: pwaapi bypass succeeded (main session blocked, pwaCookie=${pwaCookie ? "present" : "none"})`);
+              harvestBypassData(contentId, bData);
+              normalizeVideos(bData);
+              return NextResponse.json(bData);
+            }
           }
+        } catch (e) {
+          console.warn(`media/${contentId}: pwaapi bypass error (pwaCookie=${pwaCookie ? "present" : "none"}):`, e);
         }
-      } catch (e) {
-        console.warn(`media/${contentId}: pwaapi bypass error:`, e);
       }
       // Invalidate session so the next request gets a fresh one
       invalidateSession();
@@ -255,22 +258,28 @@ export async function GET(
       // --- Bypass attempt 3: pwaapi contentDetail ---
       // Fallback when UUID is not in the local DB.  Also populates the hdntl cache
       // and UUID DB from the returned CDN URLs, enabling future bypass-2 calls.
-      try {
-        const bypassRes = await fetchMediaViaContentDetail(contentId, cookieHeader);
-        if (!bypassRes.headers.get("content-type")?.includes("json")) throw new Error("non-JSON from contentDetail");
-        const bypassRaw = await bypassRes.json() as Record<string, unknown>;
-        let bypassData: Record<string, unknown> = bypassRaw;
-        if (bypassRaw.response) {
-          try { bypassData = decrypt(bypassRaw.response as string); } catch { bypassData = bypassRaw; }
+      // Try with current session first, then without any session (pwaapi often works unauthenticated).
+      for (const pwaCookie of [cookieHeader, ""]) {
+        try {
+          const bypassRes = await fetchMediaViaContentDetail(contentId, pwaCookie);
+          if (!bypassRes.headers.get("content-type")?.includes("json")) {
+            if (pwaCookie === "") throw new Error("non-JSON from contentDetail (no-session)");
+            continue;
+          }
+          const bypassRaw = await bypassRes.json() as Record<string, unknown>;
+          let bypassData: Record<string, unknown> = bypassRaw;
+          if (bypassRaw.response) {
+            try { bypassData = decrypt(bypassRaw.response as string); } catch { bypassData = bypassRaw; }
+          }
+          if (hasVideos(bypassData)) {
+            console.log(`media/${contentId}: pwaapi contentDetail bypass succeeded (pwaCookie=${pwaCookie ? "present" : "none"})`);
+            harvestBypassData(contentId, bypassData);
+            normalizeVideos(bypassData);
+            return NextResponse.json(bypassData);
+          }
+        } catch (e) {
+          console.warn(`media/${contentId}: contentDetail bypass error (pwaCookie=${pwaCookie ? "present" : "none"}):`, e);
         }
-        if (hasVideos(bypassData)) {
-          console.log(`media/${contentId}: pwaapi contentDetail bypass succeeded`);
-          harvestBypassData(contentId, bypassData);
-          normalizeVideos(bypassData);
-          return NextResponse.json(bypassData);
-        }
-      } catch (e) {
-        console.warn(`media/${contentId}: contentDetail bypass error:`, e);
       }
 
       console.log(`media/${contentId}: all bypass attempts exhausted`);

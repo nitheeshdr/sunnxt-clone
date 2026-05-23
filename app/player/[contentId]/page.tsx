@@ -82,6 +82,11 @@ export default function PlayerPage({ params }: Props) {
         return;
       }
 
+      if (data.error === "session_blocked" || data.error === "upstream_error") {
+        setError(data.message || "SunNXT is temporarily unavailable. Please wait a moment and retry.");
+        return;
+      }
+
       if (data.code !== 200 || !data.results?.[0]?.videos?.values?.length) {
         setError("Stream unavailable.");
         return;
@@ -123,6 +128,8 @@ export default function PlayerPage({ params }: Props) {
       })));
 
       let lastErr: unknown = null;
+      let allDrmErrors = true;
+      const isLiveStream = videos.some((v) => /livestream/i.test(v.link || ""));
       for (const video of ordered) {
         try {
           console.log("Player: trying format", video.format, video.link.split("?")[0].split("/").pop());
@@ -130,12 +137,20 @@ export default function PlayerPage({ params }: Props) {
           return; // success
         } catch (e) {
           lastErr = e;
+          const code = (e as { code?: number })?.code;
+          if (code !== 4012 && code !== 4032 && code !== 6007) allDrmErrors = false;
           console.warn("Player: format", video.format, "failed — trying next");
         }
       }
+      if (allDrmErrors && isLiveStream) {
+        throw Object.assign(new Error("hdcp_required"), { _hdcpLive: true });
+      }
       throw lastErr ?? new Error("No playable stream found.");
     } catch (e: unknown) {
-      if (e && typeof e === "object" && "category" in e) {
+      if (e && typeof e === "object" && "_hdcpLive" in e) {
+        console.warn("Live channel: all formats blocked by HDCP output restriction");
+        setError("This live HD channel requires HDCP hardware support not available in the browser. Try the SunNXT app on a TV or mobile device.");
+      } else if (e && typeof e === "object" && "category" in e) {
         const err = e as { code?: number; category?: number; data?: unknown[] };
         const d = Array.isArray(err.data) ? err.data : [];
         const isDrm = err.category === 6 || ((err.code ?? 0) >= 6000 && (err.code ?? 0) < 7000);
@@ -193,6 +208,10 @@ export default function PlayerPage({ params }: Props) {
     }
 
     if (playerRef.current) await playerRef.current.destroy();
+
+    // Reset residual CDM session (e.g. output-restricted key status) so it doesn't
+    // carry over and cause 4032 when Shaka filters the next format's manifest.
+    try { await videoRef.current.setMediaKeys(null); } catch { /* best effort */ }
 
     const player = new shaka.Player();
     await player.attach(videoRef.current);
@@ -276,15 +295,31 @@ export default function PlayerPage({ params }: Props) {
       // (including dash-cenc) typically list both ContentProtection schemes and
       // Chrome will pick Widevine even for dash-cenc content.  Omitting Widevine
       // here causes Shaka error 6012 on Chrome for any DASH manifest.
+      //
+      // Request SW_SECURE_DECODE (Widevine L3) robustness so the license server
+      // issues keys without mandatory HDCP output protection — without this,
+      // Nagravision returns a license that requires HDCP 2.x and Chrome's software
+      // CDM reports "output-restricted", causing Shaka error 4012/4032.
+      // Shaka 5.x: videoRobustness/audioRobustness in advanced are string[] | null.
+      // Top-level defaultVideoRobustnessForWidevine is the simpler API.
+      // SW_SECURE_DECODE (L3) tells Nagravision to issue a key without HDCP requirement.
       player.configure({
         drm: {
           servers: {
             "com.widevine.alpha": proxyLicenseUrl,
             "com.microsoft.playready": proxyLicenseUrl,
           },
+          defaultVideoRobustnessForWidevine: "SW_SECURE_DECODE",
+          defaultAudioRobustnessForWidevine: "SW_SECURE_CRYPTO",
+          advanced: {
+            "com.widevine.alpha": {
+              videoRobustness: ["SW_SECURE_DECODE"],
+              audioRobustness: ["SW_SECURE_CRYPTO"],
+            },
+          },
         },
       });
-      console.log("Player: DRM configured for", video.format, "→ Widevine + PlayReady");
+      console.log("Player: DRM configured for", video.format, "→ Widevine L3 SW_SECURE_DECODE");
     }
 
     const fallbacks = buildQualityFallbacks(video.link);
