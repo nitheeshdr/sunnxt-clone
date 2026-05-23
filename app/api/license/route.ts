@@ -14,6 +14,39 @@ function buildPwaapiLicenseUrl(originalUrl: string, contentId?: string | null): 
   return `https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=${cid}`;
 }
 
+// FairPlay requires a certificate fetched via GET before the license challenge can
+// be generated. Shaka uses serverCertificateUri (GET) separate from the license
+// server (POST). We point both at this proxy — GET proxies the cert, POST proxies
+// the license challenge.
+export async function GET(request: NextRequest) {
+  const licenseUrl = request.nextUrl.searchParams.get("url");
+  if (!licenseUrl) {
+    return NextResponse.json({ error: "Missing url param" }, { status: 400 });
+  }
+  try {
+    const headers = {
+      origin: "https://www.sunnxt.com",
+      referer: "https://www.sunnxt.com/",
+      "user-agent": UA,
+    };
+    let res = await fetch(licenseUrl, { method: "GET", headers, cache: "no-store" });
+    if (!res.ok) {
+      const cookie = await getSunnxtCookies().catch(() => "");
+      if (cookie) res = await fetch(licenseUrl, { method: "GET", headers: { ...headers, cookie }, cache: "no-store" });
+    }
+    if (!res.ok) {
+      console.error(`FairPlay cert server ${res.status} for ${licenseUrl.split("?")[0]}`);
+      return NextResponse.json({ error: `Certificate server ${res.status}` }, { status: res.status });
+    }
+    const data = await res.arrayBuffer();
+    console.log(`License (cert): GET → ${res.status}, ${data.byteLength} bytes`);
+    return new NextResponse(data, { headers: { "content-type": "application/octet-stream" } });
+  } catch (e) {
+    console.error("Certificate proxy error:", e);
+    return NextResponse.json({ error: "Certificate proxy failed" }, { status: 500 });
+  }
+}
+
 export async function POST(request: NextRequest) {
   const licenseUrl = request.nextUrl.searchParams.get("url");
   if (!licenseUrl) {
@@ -22,6 +55,10 @@ export async function POST(request: NextRequest) {
 
   // contentId passed explicitly by the player (from the content page URL)
   const contentId = request.nextUrl.searchParams.get("contentId");
+  // isLive=1: skip modularLicense. Used for:
+  //   • Live channels — modularLicense enforces HDCP_V2 for live content IDs
+  //   • FairPlay (hls-fp-aapl) — modularLicense is Widevine-only, wrong challenge format
+  const isLive = request.nextUrl.searchParams.get("isLive") === "1";
 
   try {
     const challenge = await request.arrayBuffer();
@@ -36,9 +73,11 @@ export async function POST(request: NextRequest) {
     const post = (url: string) =>
       fetch(url, { method: "POST", headers, body: challenge, cache: "no-store" });
 
-    // 1. Try pwaapi modularLicense — no subscription check, used by the real player
+    // 1. Try pwaapi modularLicense — no subscription check, used by the real player.
+    // Skip for live channels: modularLicense returns HDCP_V2-enforcing licenses for
+    // live content IDs, causing output-restricted key status in the browser CDM.
     const pwaapiUrl = buildPwaapiLicenseUrl(licenseUrl, contentId);
-    if (pwaapiUrl) {
+    if (pwaapiUrl && !isLive) {
       const r = await post(pwaapiUrl);
       if (r.ok) {
         const data = await r.arrayBuffer();
@@ -59,6 +98,9 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. Fall back to original license URL (api.sunnxt.com/nagravision)
+    if (isLive) {
+      console.log(`License: isLive=1 — skipping modularLicense (live/FairPlay), using original URL directly for content_id=${contentId || "?"}`);
+    }
     const cookie = await getSunnxtCookies().catch(() => "");
     const makeRequest = (withCookie: boolean) =>
       fetch(licenseUrl, {

@@ -107,12 +107,18 @@ export default function PlayerPage({ params }: Props) {
       const widevineDash = videos.find((v) => v.format === "dash" && v.licenseUrl);
       const cencDash = videos.find((v) => v.format === "dash-cenc" && v.licenseUrl);
       const hlsVideo = videos.find((v) => v.format?.includes("hls") && v.format !== "hls-fp-aapl");
-      const ordered = [clearDash, widevineDash, cencDash, hlsVideo, videos[0]]
+      // FairPlay HLS is the native DRM for Safari/iOS — prefer it over DASH CENC on Apple devices.
+      const fairPlayHls = isSafari ? videos.find((v) => v.format === "hls-fp-aapl") : undefined;
+      // Safari: prefer FairPlay HLS (native Apple DRM) → then unencrypted DASH → then CENC DASH as last resort.
+      // Other browsers: Widevine DASH → CENC DASH → generic HLS → fallback.
+      const ordered = (isSafari
+        ? [clearDash, fairPlayHls, hlsVideo, cencDash, widevineDash, videos[0]]
+        : [clearDash, widevineDash, cencDash, hlsVideo, videos[0]]
+      )
         .filter((v): v is VideoEntry => !!v)
         .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i)
         .filter((v) => !failedDrmLinksRef.current.has(v.link))
-        .filter((v) => !failedFormatsRef.current.has(v.format))
-        .filter((v) => isSafari || v.format !== "hls-fp-aapl");
+        .filter((v) => !failedFormatsRef.current.has(v.format));
 
       // Akamai DASH manifests include ContentProtection elements even for nominally
       // unencrypted streams — Shaka throws 6012 (NO_LICENSE_SERVER_GIVEN) if no
@@ -284,42 +290,62 @@ export default function PlayerPage({ params }: Props) {
       inferredLicenseUrl ??
       (video.format !== "dash" ? fallbackLicenseUrl : null) ??
       null;
+    // Live channel: skip modularLicense (enforces HDCP for live IDs).
+    // FairPlay: skip modularLicense (it's Widevine-only, wrong challenge format).
+    // Both use the original nagravisionDRMProxy / FairPlay URL directly.
+    const isLiveChannel = /livestream/i.test(video.link);
+    const isFairPlay = video.format === "hls-fp-aapl";
+    const bypassModular = isLiveChannel || isFairPlay;
     // Pass contentId so the license proxy can try pwaapi modularLicense
     // (no subscription check) before falling back to the api.sunnxt.com endpoint.
     const proxyLicenseUrl = effectiveLicenseUrl
-      ? `/api/license?url=${encodeURIComponent(effectiveLicenseUrl)}&contentId=${encodeURIComponent(id)}`
+      ? `/api/license?url=${encodeURIComponent(effectiveLicenseUrl)}&contentId=${encodeURIComponent(id)}${bypassModular ? "&isLive=1" : ""}`
       : null;
 
     if (proxyLicenseUrl) {
-      // Configure both Widevine and PlayReady regardless of format — DASH manifests
-      // (including dash-cenc) typically list both ContentProtection schemes and
-      // Chrome will pick Widevine even for dash-cenc content.  Omitting Widevine
-      // here causes Shaka error 6012 on Chrome for any DASH manifest.
-      //
-      // Request SW_SECURE_DECODE (Widevine L3) robustness so the license server
-      // issues keys without mandatory HDCP output protection — without this,
-      // Nagravision returns a license that requires HDCP 2.x and Chrome's software
-      // CDM reports "output-restricted", causing Shaka error 4012/4032.
-      // Shaka 5.x: videoRobustness/audioRobustness in advanced are string[] | null.
-      // Top-level defaultVideoRobustnessForWidevine is the simpler API.
-      // SW_SECURE_DECODE (L3) tells Nagravision to issue a key without HDCP requirement.
-      player.configure({
-        drm: {
-          servers: {
-            "com.widevine.alpha": proxyLicenseUrl,
-            "com.microsoft.playready": proxyLicenseUrl,
-          },
-          defaultVideoRobustnessForWidevine: "SW_SECURE_DECODE",
-          defaultAudioRobustnessForWidevine: "SW_SECURE_CRYPTO",
-          advanced: {
-            "com.widevine.alpha": {
-              videoRobustness: ["SW_SECURE_DECODE"],
-              audioRobustness: ["SW_SECURE_CRYPTO"],
+      if (isFairPlay) {
+        // FairPlay (com.apple.fps.1_0) — Safari/iPhone only.
+        // serverCertificateUri uses the same proxy URL; our GET handler returns the cert.
+        player.configure({
+          drm: {
+            servers: { "com.apple.fps.1_0": proxyLicenseUrl },
+            advanced: {
+              "com.apple.fps.1_0": {
+                serverCertificateUri: proxyLicenseUrl,
+              },
             },
           },
-        },
-      });
-      console.log("Player: DRM configured for", video.format, "→ Widevine L3 SW_SECURE_DECODE");
+        });
+        console.log("Player: DRM configured for", video.format, "→ FairPlay");
+      } else {
+        // Configure both Widevine and PlayReady regardless of format — DASH manifests
+        // (including dash-cenc) typically list both ContentProtection schemes and
+        // Chrome will pick Widevine even for dash-cenc content.  Omitting Widevine
+        // here causes Shaka error 6012 on Chrome for any DASH manifest.
+        //
+        // Request SW_SECURE_DECODE (Widevine L3) robustness so the license server
+        // issues keys without mandatory HDCP output protection — without this,
+        // Nagravision returns a license that requires HDCP 2.x and Chrome's software
+        // CDM reports "output-restricted", causing Shaka error 4012/4032.
+        // Shaka 5.x: videoRobustness/audioRobustness in advanced are string[] | null.
+        player.configure({
+          drm: {
+            servers: {
+              "com.widevine.alpha": proxyLicenseUrl,
+              "com.microsoft.playready": proxyLicenseUrl,
+            },
+            defaultVideoRobustnessForWidevine: "SW_SECURE_DECODE",
+            defaultAudioRobustnessForWidevine: "SW_SECURE_CRYPTO",
+            advanced: {
+              "com.widevine.alpha": {
+                videoRobustness: ["SW_SECURE_DECODE"],
+                audioRobustness: ["SW_SECURE_CRYPTO"],
+              },
+            },
+          },
+        });
+        console.log("Player: DRM configured for", video.format, "→ Widevine L3 SW_SECURE_DECODE");
+      }
     }
 
     const fallbacks = buildQualityFallbacks(video.link);
