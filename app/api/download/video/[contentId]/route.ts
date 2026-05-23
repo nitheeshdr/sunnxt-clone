@@ -248,6 +248,7 @@ export async function GET(
 
   // --- Info-only response (no stream param) ---
   if (!wantStream && !wantMerge) {
+    const ffmpegAvailable = !!(await checkFfmpeg());
     return NextResponse.json({
       title,
       contentId,
@@ -255,6 +256,7 @@ export async function GET(
       format: target.format,
       mpdUrl: target.link,
       licenseUrl: target.licenseUrl ?? null,
+      ffmpegAvailable,
       mergeDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&merge=1`,
       videoDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&track=video`,
       audioDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&track=audio`,

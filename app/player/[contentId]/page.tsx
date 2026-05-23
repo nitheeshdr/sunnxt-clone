@@ -25,6 +25,7 @@ export default function PlayerPage({ params }: Props) {
   const [isGeoBlocked, setIsGeoBlocked] = useState(false);
   const [downloadInfo, setDownloadInfo] = useState<{
     encrypted: boolean;
+    ffmpegAvailable: boolean;
     mergeUrl: string;
     videoUrl: string;
     audioUrl: string;
@@ -75,6 +76,7 @@ export default function PlayerPage({ params }: Props) {
       const data = await res.json();
       setDownloadInfo({
         encrypted: data.encrypted,
+        ffmpegAvailable: data.ffmpegAvailable ?? false,
         mergeUrl: data.mergeDownloadUrl,
         videoUrl: data.videoDownloadUrl,
         audioUrl: data.audioDownloadUrl,
@@ -583,21 +585,54 @@ export default function PlayerPage({ params }: Props) {
               </div>
             )}
 
-            <div className="flex flex-wrap gap-3">
-              <a
-                href={downloadInfo.mergeUrl}
-                download
-                className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 10l5 5 5-5M12 3v12" />
-                </svg>
-                Download MP4
-              </a>
-            </div>
-            <p className="text-gray-500 text-xs mt-3">
-              Video and audio are merged server-side. Requires ffmpeg on the server.
-            </p>
+            {downloadInfo.ffmpegAvailable ? (
+              <>
+                <div className="flex flex-wrap gap-3">
+                  <a
+                    href={downloadInfo.mergeUrl}
+                    download
+                    className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 10l5 5 5-5M12 3v12" />
+                    </svg>
+                    Download MP4
+                  </a>
+                </div>
+                <p className="text-gray-500 text-xs mt-3">Video and audio merged server-side via ffmpeg.</p>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-3">
+                  <a
+                    href={downloadInfo.videoUrl}
+                    download
+                    className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 10l5 5 5-5M12 3v12" />
+                    </svg>
+                    Download Video
+                  </a>
+                  <a
+                    href={downloadInfo.audioUrl}
+                    download
+                    className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm12-3c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2z" />
+                    </svg>
+                    Download Audio
+                  </a>
+                </div>
+                <p className="text-gray-500 text-xs mt-3">
+                  Merge with:{" "}
+                  <code className="text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded text-[11px]">
+                    ffmpeg -i video.mp4 -i audio.mp4 -c copy merged.mp4
+                  </code>
+                </p>
+              </>
+            )}
           </div>
         </div>
       )}
