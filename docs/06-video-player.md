@@ -100,6 +100,49 @@ We prefer `clearDash` (no DRM overhead) over `cencDash` (requires license server
 
 ---
 
+## FairPlay Format Selection (Safari / iOS)
+
+Safari and iOS do not support Widevine or PlayReady. The only DRM that works on Apple platforms is FairPlay. SunNXT provides a dedicated stream entry with `format === "hls-fp-aapl"` for this case.
+
+**Previous bug:** The general `hlsVideo` selector matched any format containing `"hls"`, which could pick up `hlsaes` (AES-128, not FairPlay) before trying `hls-fp-aapl`. On Safari, loading an `hlsaes` stream causes DRM failure because the browser expects a FairPlay session, not a raw AES key URL.
+
+**Fix:** `hls-fp-aapl` is now selected explicitly before the generic HLS fallback:
+
+```typescript
+const isFairPlay = (v: VideoEntry) => v.format === "hls-fp-aapl";
+const fairPlayVideo = videos.find(isFairPlay);
+const hlsVideo = videos.find(
+  (v) => !isFairPlay(v) && (v.format?.includes("hls") || v.link?.includes(".m3u8"))
+);
+
+const ordered = [clearDash, cencDash, fairPlayVideo, hlsVideo, videos[0]]
+  .filter((v): v is VideoEntry => !!v)
+  .filter((v, i, arr) => arr.findIndex((x) => x.link === v.link) === i);
+```
+
+When the player encounters a `hls-fp-aapl` entry, it detects FairPlay and configures the key system accordingly:
+
+```typescript
+const isFairPlay = video.format === "hls-fp-aapl";
+
+if (isFairPlay) {
+  player.configure({
+    drm: {
+      servers: { "com.apple.fps.1_0": proxyLicenseUrl },
+      advanced: {
+        "com.apple.fps.1_0": {
+          serverCertificateUri: proxyLicenseUrl, // GET → returns FairPlay certificate
+        },
+      },
+    },
+  });
+}
+```
+
+The license proxy (`/api/license`) has a new GET handler: when called with `GET`, it proxies the FairPlay server certificate from Nagravision. When called with `POST`, it proxies the FairPlay license challenge (same URL, different HTTP method). `isLive=1` is also set for FairPlay streams — `modularLicense` is Widevine-specific and would produce an invalid challenge format for FairPlay.
+
+---
+
 ## Quality Fallback: `buildQualityFallbacks()`
 
 SunNXT's Akamai CDN sometimes has only specific quality tiers uploaded. `_est_sd.mpd` (SD quality) often returns 404 while `_est_hd.mpd` (HD quality) works.
@@ -267,6 +310,60 @@ startPlayback(video: VideoEntry, contentId: string)
     ├─ videoRef.current.play()
     └─ startHeartbeat(contentId)
 ```
+
+---
+
+## Download Feature
+
+The download feature exposes a separate API route that lets clients download DASH video and audio as standard fragmented MP4 files.
+
+### Route: `GET /api/download/video/[contentId]`
+
+Without additional parameters, this endpoint returns a JSON object with stream info:
+
+```json
+{
+  "contentId": "82850",
+  "title": "...",
+  "videoUrl": "https://.../_est_hd.mpd?hdntl=...",
+  "mpdParsed": {
+    "videoBandwidth": 2500000,
+    "audioMimeType": "audio/mp4",
+    "segmentCount": 120
+  },
+  "encrypted": true,
+  "encryptionNote": "Segments are CENC-encrypted. Content key required for playback."
+}
+```
+
+### Streaming Mode: `?stream=1&track=video` / `?stream=1&track=audio`
+
+With `stream=1`, the route fetches the MPD, parses `SegmentTemplate` + `SegmentTimeline`, picks the highest-bandwidth `Representation`, assembles an `init.mp4` + all segment URLs, and streams them back to the client as a single valid fragmented MP4 (fMP4).
+
+Key implementation details:
+- **MPD parser** handles `SegmentTemplate` + `SegmentTimeline`, computing each segment's URL by substituting `$Time$` and `$Number$` template variables
+- **Akamai `hdntl` auth tokens** are preserved from the MPD URL query string and forwarded with every segment request
+- **Video and audio** are separate tracks — the client receives two separate fMP4 files
+
+To merge them locally:
+```bash
+ffmpeg -i video.mp4 -i audio.mp4 -c copy merged.mp4
+```
+
+### Server-Side Merge: `?stream=1&merge=1`
+
+When `merge=1` is provided alongside `stream=1`, the server downloads both video and audio tracks, writes them to temporary files, calls `ffmpeg -i video.mp4 -i audio.mp4 -c copy`, and streams the merged result. This requires `ffmpeg` installed on the server and is **not compatible with Vercel serverless** due to disk write and execution time limits.
+
+### DRM-Encrypted Content
+
+For DRM-encrypted content, segment bytes download successfully (the CDN does not block download — only decryption requires a license). The downloaded fMP4 is CENC-encrypted and cannot be played without the content key. For VOD content, the key is obtainable via `pwaapi modularLicense` (VULN-11). For live channels, `modularLicense` returns HDCP-enforcing licenses that cannot be satisfied in a browser.
+
+### Player UI Integration
+
+Once stream info loads, the player UI shows a download button in the top-right corner of the player. Clicking it reveals:
+- Video track download link (fMP4)
+- Audio track download link (fMP4)
+- Encryption status badge (encrypted / clear)
 
 ---
 

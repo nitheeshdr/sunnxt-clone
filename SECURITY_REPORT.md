@@ -11,7 +11,7 @@
 | **Scope** | sunnxt.com — Web App, REST APIs, CDN, DRM Infrastructure |
 | **Test Period** | May 2026 |
 | **Report Date** | May 23, 2026 |
-| **Report Version** | 2.1 — Updated with post-harvest findings and DRM live channel analysis |
+| **Report Version** | 2.2 — Updated with FairPlay DRM support, live channel DRM fix, and download feature findings |
 | **Classification** | Confidential — For SunNXT Security Team Only |
 
 ---
@@ -1036,4 +1036,48 @@ When `HTMLMediaElement.setMediaKeys()` is not explicitly called with `null` afte
 
 ---
 
-*Report prepared by Nitheesh D R — May 23, 2026. Addendum added May 23, 2026.*
+*Report prepared by Nitheesh D R — May 23, 2026. Addendum v2.1 added May 23, 2026.*
+
+---
+
+## 13. Addendum v2.2 — FairPlay DRM, Live Channel DRM Fix, Download Feature (May 2026)
+
+### G. FairPlay DRM — Safari / iOS Support
+
+**Finding:** The `hls-fp-aapl` stream format was never being selected on Safari/iOS due to a bug in the format-selection priority logic. The generic HLS selector matched `hlsaes` entries first, causing FairPlay streams to be skipped entirely. On Safari, this resulted in DRM failure because Apple's EME implementation expects a `com.apple.fps.1_0` session.
+
+**Fix implemented:**
+- `hls-fp-aapl` is now selected explicitly before the generic HLS fallback
+- Player detects `isFairPlay = video.format === "hls-fp-aapl"` and configures `com.apple.fps.1_0` key system
+- `serverCertificateUri` is set to the license proxy URL; a new GET handler on the license proxy returns the FairPlay server certificate from Nagravision (with session-cookie fallback)
+- `isLive=1` flag is also set for FairPlay license requests — `modularLicense` cannot handle FairPlay challenges (incompatible binary format); requests are routed directly to `nagravisionDRMProxy`
+
+**Security note:** FairPlay certificate retrieval via the proxy GET endpoint requires the server session to be valid. The certificate is not sensitive (it is a public key infrastructure component), but the routing through the proxy means the server's session cookie is attached — this is consistent with existing VULN-16 behavior.
+
+### H. Live Channel DRM — modularLicense HDCP Enforcement
+
+**Finding:** `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` returns Widevine licenses for live channel content IDs, but those licenses unconditionally include `output_protection.hdcp = HDCP_V2`. This is not negotiable via Widevine robustness hints in the license challenge — it is a static Nagravision license template policy for all live channel IDs.
+
+**Impact:** Using `modularLicense` for live channels causes `output-restricted` key status in the browser CDM for all live channels (including SD), not just HD channels. Previously this appeared as an HDCP enforcement issue specific to HD channels; in fact the root cause is `modularLicense`'s unconditional HDCP policy for live content.
+
+**Fix:** The `isLive=1` flag in the license proxy URL causes the proxy to skip `modularLicense` and route directly to `nagravisionDRMProxy` (authenticated, with session JWT + cookie). `nagravisionDRMProxy` issues licenses without the unconditional HDCP requirement for SD live channels. Live channels now play on Chrome, Firefox, Edge, and Android browsers.
+
+**Residual:** HD live channels (`*HDB_IN`) remain blocked on desktop because the HDCP_V2 policy is applied at the channel level in Nagravision CAS — it is present in `nagravisionDRMProxy` responses as well, just for those specific channel IDs. Android TV and Chromecast (hardware HDCP path) can play HD live channels.
+
+**Relation to existing findings:** This finding refines the scope of finding E (v2.1 addendum). The HDCP enforcement for live content is a two-layer issue: (1) `modularLicense` applies it to all live IDs unconditionally; (2) `nagravisionDRMProxy` applies it selectively only to HD channel IDs.
+
+### I. Download Feature — DASH-to-fMP4 Segment Streaming
+
+A new route `GET /api/download/video/[contentId]` was implemented and tested. Security-relevant observations:
+
+**CDN access without subscription:** Segment bytes are served by Akamai CDN with only a valid `hdntl` token — no subscription check. The download route uses the server's session (consistent with VULN-16) to obtain stream URLs and the `hdntl` token, then fetches segments directly. This demonstrates again that CDN access is entirely decoupled from subscription enforcement (VULN-06 / VULN-20).
+
+**DRM-encrypted content:** Downloaded fMP4 segments are CENC-encrypted. The raw files are not playable without the content decryption key. For VOD content, the key is obtainable via `modularLicense` (VULN-11). Combined with the download route, this provides a complete offline content extraction path for VOD: download segments → obtain key via VULN-11 → decrypt with `mp4decrypt` or `ffmpeg` + key.
+
+**Server-side merge (`?stream=1&merge=1`):** Requires `ffmpeg` installed locally. Not compatible with Vercel serverless due to disk write constraints and function execution time limits. Suitable for local development/testing use only.
+
+**MPD parsing:** The route implements a SegmentTemplate + SegmentTimeline parser. Akamai `hdntl` auth tokens from the MPD URL query string are preserved and forwarded with every segment request. The parser picks the highest-bandwidth video `Representation` and the first audio `Representation`.
+
+**Player UI:** A download button appears in the top-right of the player once stream info loads. It displays video/audio download links and encryption status. This surface (download button + stream info endpoint) is accessible to any unauthenticated user due to VULN-16 (server session proxied to all users).
+
+*Addendum v2.2 prepared by Nitheesh D R — May 2026.*

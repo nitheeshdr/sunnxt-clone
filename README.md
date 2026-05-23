@@ -26,7 +26,10 @@ A fully functional clone of the [SunNXT](https://www.sunnxt.com) streaming platf
 | Detail Pages | Cast, genres, subtitles, release year, Dolby badge |
 | Video Player | MPEG-DASH + HLS adaptive streaming via Shaka Player |
 | Live TV | Real-time live channel streaming |
-| DRM Support | Widevine & PlayReady encrypted streams |
+| DRM Support | Widevine, PlayReady, and FairPlay (Safari/iOS) encrypted streams |
+| FairPlay (Safari/iOS) | `hls-fp-aapl` format selected first on Safari; `com.apple.fps.1_0` key system configured with certificate + license proxy |
+| Live Channel DRM Fix | `isLive=1` flag bypasses modularLicense and goes directly to nagravisionDRMProxy for live content |
+| Download | `GET /api/download/video/[contentId]` — stream info JSON + `?stream=1` DASH-to-fMP4 streaming; optional server-side merge with ffmpeg |
 | Geo-block Handling | Detects roaming errors and auto re-authenticates |
 | Auto Login | Server-side session with automatic refresh + device-limit bypass |
 | Heartbeat | Tracks watch sessions (Start/Stop events every 30s) |
@@ -142,10 +145,11 @@ sunnxt-clone/
 │   └── api/
 │       ├── media/[contentId]/      # Stream URL resolver + 3-path bypass
 │       ├── stream-proxy/           # CDN CORS proxy + manifest rewriter
-│       ├── license/                # DRM license proxy (Widevine/PlayReady)
+│       ├── license/                # DRM license proxy (Widevine/PlayReady/FairPlay)
 │       ├── search/                 # Search proxy
 │       ├── heartbeat/              # Watch session tracker
 │       ├── download/               # File/subtitle download proxy
+│       │   └── video/[contentId]/  # DASH-to-fMP4 video download (stream info + segment streaming)
 │       └── auth/                   # Login / logout / status / clear-session
 │
 ├── lib/
@@ -181,6 +185,9 @@ sunnxt-clone/
 - UUID database harvested to 536 entries in a single 10k-ID run
 - Live HD channels (KTVHDB, SunTVHDB) have hard HDCP enforcement in Nagravision license policy — browser playback not possible regardless of DRM config
 - Shaka 5.x breaking change: `videoRobustness`/`audioRobustness` in `advanced` must be `string[]`, not `string`
+- FairPlay DRM now correctly handled: `hls-fp-aapl` format selected first on Safari/iOS; `com.apple.fps.1_0` key system with server certificate fetched via GET on the license proxy
+- Live channel DRM fix: `isLive=1` flag in license proxy URL causes the proxy to skip `modularLicense` (which returns HDCP-enforcing licenses for all live content) and go directly to `nagravisionDRMProxy` — live channels now play on Chrome/Firefox/Edge/Android
+- Download feature: `GET /api/download/video/[contentId]` returns stream info JSON; `?stream=1&track=video|audio` streams DASH segments as fragmented MP4; `?stream=1&merge=1` auto-merges server-side using ffmpeg (not compatible with Vercel serverless)
 
 See [SECURITY_REPORT.md](SECURITY_REPORT.md) for the full report with CVSS scores, PoC, remediation, and the May 2026 addendum.
 

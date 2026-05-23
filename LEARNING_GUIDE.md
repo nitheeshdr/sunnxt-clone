@@ -494,6 +494,36 @@ if (firstByte === 0x7B) {
 | 1001 | SEGMENT_NOT_FOUND | hdntl token expired or wrong |
 | 1002 | BAD_HTTP_STATUS | CDN returned non-200 |
 
+### FairPlay DRM (Safari / iOS)
+
+FairPlay is Apple's DRM system and the only DRM that works in Safari or any iOS browser. It uses a different protocol from Widevine/PlayReady:
+
+```
+1. Browser requests serverCertificate (GET to license server)
+   → License server returns Apple-issued public key certificate
+2. Browser generates FairPlay license challenge (binary, different format from Widevine)
+3. Browser POSTs challenge to license server
+4. License server validates + returns FairPlay license
+5. CDM decrypts content
+```
+
+SunNXT provides the `hls-fp-aapl` stream format for Safari/iOS. Key implementation details:
+
+- **Key system:** `com.apple.fps.1_0` (not `com.widevine.alpha`)
+- **`serverCertificateUri`:** Points to the license proxy GET endpoint — Shaka fetches the certificate automatically
+- **License routing:** Must go to `nagravisionDRMProxy` (not `modularLicense`) because `modularLicense` only understands Widevine protobuf challenges; FairPlay challenges have an incompatible binary format
+- **`isLive=1` flag:** Used for FairPlay even for VOD content, to force proxy routing to `nagravisionDRMProxy`
+
+**Previous bug:** The format-selection logic selected `hlsaes` before `hls-fp-aapl` on Safari, causing immediate DRM failure. Fixed by explicitly checking `format === "hls-fp-aapl"` before the generic HLS fallback.
+
+### Live Channel DRM Fix (isLive=1)
+
+`modularLicense` returns HDCP_V2-enforcing licenses for **all** live channel content IDs — not just HD channels. This is unconditional: the Nagravision license template for live content always includes `output_protection.hdcp = HDCP_V2`.
+
+**Fix:** The `isLive=1` flag in the license proxy URL routes the request to `nagravisionDRMProxy` instead. `nagravisionDRMProxy` does not apply the unconditional HDCP policy to SD live channels. Result: live channels now play on Chrome, Firefox, Edge, and Android after this fix.
+
+**Still blocked:** HD live channels (`*HDB_IN`) remain blocked on desktop — the HDCP_V2 policy is also present at the channel level in `nagravisionDRMProxy` for those specific IDs. Android TV and Chromecast can play HD live channels via hardware HDCP.
+
 ---
 
 ## 9. How CORS Is Bypassed
@@ -1210,6 +1240,83 @@ Step 5: On success: stolen account with active subscription
 ```
 
 **Vulnerabilities:** VULN-15, VULN-10
+
+---
+
+## 19a. Download Feature — DASH-to-fMP4 Streaming
+
+### What It Does
+
+The download feature lets clients retrieve SunNXT DASH video and audio as standard fragmented MP4 files, outside of the player UI.
+
+### Route Structure
+
+```
+GET /api/download/video/[contentId]
+  → Returns stream info JSON (MPD URL, encryption status, parsed segment info)
+
+GET /api/download/video/[contentId]?stream=1&track=video
+  → Streams DASH video segments assembled into a single fMP4
+
+GET /api/download/video/[contentId]?stream=1&track=audio
+  → Streams DASH audio segments assembled into a single fMP4
+
+GET /api/download/video/[contentId]?stream=1&merge=1
+  → Server-side ffmpeg merge of video + audio (local only, not Vercel-compatible)
+```
+
+### MPD Parser
+
+The route implements a SegmentTemplate + SegmentTimeline parser:
+
+1. Fetches MPD via stream proxy (attaches `hdntl` token)
+2. Parses all `AdaptationSet` elements, separating video and audio
+3. For video: picks the highest-bandwidth `Representation`
+4. For audio: picks the first `Representation`
+5. Resolves segment URLs using `$Time$` / `$Number$` template substitution
+6. Preserves Akamai `hdntl` auth tokens from the MPD URL query string in every segment request
+
+### How the fMP4 Is Built
+
+```
+init.mp4 (DASH initialization segment)
+  +
+segment_1.m4s
+segment_2.m4s
+segment_3.m4s
+...
+= streamed back-to-back as a single HTTP response
+```
+
+The resulting file is a valid fragmented MP4 that most players can open directly. Video and audio are separate files.
+
+### Merging
+
+```bash
+# Client-side merge (always works):
+ffmpeg -i video.mp4 -i audio.mp4 -c copy merged.mp4
+
+# Server-side merge (?stream=1&merge=1):
+# Requires ffmpeg installed on the server
+# Not compatible with Vercel serverless (disk write + execution time limits)
+```
+
+### DRM Considerations
+
+For DRM-encrypted content:
+- Segment bytes download successfully (CDN does not decrypt — only validates the `hdntl` token)
+- The downloaded fMP4 is CENC-encrypted (AES-128-CTR)
+- Playback requires the content decryption key (content key ID is in the PSSH box in `init.mp4`)
+- For VOD content: key is obtainable via `modularLicense` (VULN-11) — no auth required
+- Combined with the download route, this is a complete offline content extraction path for VOD
+- For live channels: `modularLicense` returns HDCP-enforcing licenses; key extraction is not practical in a browser context
+
+### Player UI
+
+Once stream info loads (successful call to `/api/download/video/[contentId]`), a download button appears in the top-right of the player. It shows:
+- Video download link → fMP4 video track
+- Audio download link → fMP4 audio track
+- Encryption status badge
 
 ---
 

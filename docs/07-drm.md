@@ -194,6 +194,107 @@ if (isDrm && currentVideoRef.current) {
 
 ---
 
+## FairPlay DRM Configuration (Safari / iOS)
+
+Safari and all iOS browsers use Apple's FairPlay DRM. FairPlay uses a different protocol from Widevine and PlayReady — it requires a **server certificate** (fetched via GET before any license challenge) and uses the `com.apple.fps.1_0` EME key system identifier.
+
+### Format Detection
+
+The `hls-fp-aapl` format label identifies a FairPlay-protected HLS stream:
+
+```typescript
+const isFairPlay = video.format === "hls-fp-aapl";
+```
+
+This check gates all FairPlay-specific configuration. Widevine robustness hints and `modularLicense` are not used for FairPlay — the license challenge format is incompatible.
+
+### Shaka Configuration for FairPlay
+
+```typescript
+if (isFairPlay) {
+  player.configure({
+    drm: {
+      servers: {
+        "com.apple.fps.1_0": proxyLicenseUrl, // POST → license challenge
+      },
+      advanced: {
+        "com.apple.fps.1_0": {
+          // Shaka fetches the certificate via GET before generating the challenge
+          serverCertificateUri: proxyLicenseUrl,
+        },
+      },
+    },
+  });
+}
+```
+
+### License Proxy — GET Handler (FairPlay Certificate)
+
+The license proxy route (`/api/license`) has a new `GET` handler alongside the existing `POST` handler:
+
+```
+GET /api/license?url=<nagravision-fairplay-cert-url>&isLive=1
+  → Proxy-fetches the FairPlay server certificate from Nagravision
+  → Attaches session cookie (fallback for certificate endpoints that require auth)
+  → Returns binary certificate blob
+```
+
+Shaka calls this automatically when it sees `serverCertificateUri`. The certificate is a binary blob that the CDM uses to encrypt the FairPlay license request.
+
+### isLive=1 Flag for FairPlay
+
+FairPlay license requests must go directly to `nagravisionDRMProxy`, not `modularLicense`. The `isLive=1` flag in the proxy URL signals this routing:
+
+```
+POST /api/license?url=<nagravisionDRMProxy-url>&isLive=1
+  → Proxy skips modularLicense routing
+  → Forwards directly to nagravisionDRMProxy with session JWT + cookie
+  → Returns FairPlay license binary
+```
+
+Without `isLive=1`, the proxy would route to `modularLicense` which only handles Widevine protobuf challenges — sending a FairPlay challenge there produces an invalid response.
+
+---
+
+## Live Channel DRM Fix (isLive=1)
+
+### The Problem
+
+`pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` is the zero-auth Widevine license endpoint (VULN-11). However, for **all live channel content IDs**, it returns Widevine licenses that unconditionally include `output_protection.hdcp = HDCP_V2`. This is a server-side policy baked into Nagravision's license response — it is not negotiated by the Widevine robustness hints sent in the challenge.
+
+This means:
+- `modularLicense` cannot serve playable live channel licenses on desktop browsers (HDCP blocks them)
+- The fix requires routing live channel license requests to a different endpoint
+
+### The Fix: nagravisionDRMProxy
+
+The original authenticated DRM endpoint `api.sunnxt.com/licenseproxy/v3/nagravisionDRMProxy/` does not apply the unconditional HDCP policy. By adding `isLive=1` to the license proxy URL, the proxy switches from `modularLicense` to `nagravisionDRMProxy`:
+
+```
+# VOD content (default path):
+POST /api/license?url=<modularLicense-url>
+  → Proxy forwards to modularLicense (no auth required)
+
+# Live channel content (isLive=1 path):
+POST /api/license?url=<nagravisionDRMProxy-url>&isLive=1
+  → Proxy attaches session JWT + cookie
+  → Forwards to nagravisionDRMProxy
+  → Returns license without unconditional HDCP requirement
+```
+
+### Result
+
+| Browser | SD Live Channels | HD Live Channels |
+|---|---|---|
+| Chrome / Firefox / Edge | Plays (after nagravisionDRMProxy fix) | Blocked (HDCP_V2 policy — hardware path required) |
+| Android (L1 Widevine) | Plays | Plays |
+| Android TV / Chromecast | Plays | Plays (hardware HDCP path) |
+| Safari / iOS | Plays via FairPlay | Plays via FairPlay |
+
+HD live channels (`*HDB_IN`) remain blocked on desktop browsers because the Nagravision license policy for those specific channels enforces HDCP_V2 regardless of which endpoint or robustness level is used — the hardware display path simply cannot be verified in a browser context.
+
+---
+
 ## Configuring DRM in Shaka 5.x
 
 **Breaking change in Shaka 5.x:** `videoRobustness` and `audioRobustness` inside `advanced` must be `string[]` (arrays), not plain strings. Passing a string silently causes "Invalid config, wrong type" and DRM fails to initialise.

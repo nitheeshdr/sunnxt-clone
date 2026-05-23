@@ -1,5 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { spawn } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { mkdtemp, writeFile, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { getSunnxtCookies } from "@/lib/sunnxt-session";
+
+const execFileAsync = promisify(execFile);
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
@@ -157,12 +165,44 @@ async function fetchBytes(url: string, cookie?: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+async function checkFfmpeg(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("which", ["ffmpeg"]);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function collectTrack(
+  segInfo: SegmentInfo,
+  cookie: string,
+  label: string,
+  contentId: string
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  const init = await fetchBytes(segInfo.initUrl, cookie);
+  chunks.push(init);
+  for (let i = 0; i < segInfo.segmentUrls.length; i++) {
+    chunks.push(await fetchBytes(segInfo.segmentUrls[i], cookie));
+    if ((i + 1) % 50 === 0) {
+      console.log(`Collect ${contentId} ${label}: ${i + 1}/${segInfo.segmentUrls.length}`);
+    }
+  }
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return buf;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ contentId: string }> }
 ) {
   const { contentId } = await params;
   const wantStream = request.nextUrl.searchParams.get("stream") === "1";
+  const wantMerge = request.nextUrl.searchParams.get("merge") === "1";
   const track = (request.nextUrl.searchParams.get("track") ?? "video") as "video" | "audio";
   const debug = request.nextUrl.searchParams.get("debug");
 
@@ -207,7 +247,7 @@ export async function GET(
   const safeName = title.replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").slice(0, 80);
 
   // --- Info-only response (no stream param) ---
-  if (!wantStream) {
+  if (!wantStream && !wantMerge) {
     return NextResponse.json({
       title,
       contentId,
@@ -215,6 +255,7 @@ export async function GET(
       format: target.format,
       mpdUrl: target.link,
       licenseUrl: target.licenseUrl ?? null,
+      mergeDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&merge=1`,
       videoDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&track=video`,
       audioDownloadUrl: `${origin}/api/download/video/${contentId}?stream=1&track=audio`,
       note: isEncrypted
@@ -248,6 +289,105 @@ export async function GET(
   const rawMpdUrl = target.link;
   const mpdBaseDir = rawMpdUrl.split("?")[0].replace(/\/[^/]+$/, "/");
   const qs = rawMpdUrl.includes("?") ? rawMpdUrl.slice(rawMpdUrl.indexOf("?")) : "";
+
+  // --- Merge: collect video + audio, run ffmpeg, stream merged MP4 ---
+  if (wantMerge) {
+    const ffmpegPath = await checkFfmpeg();
+    if (!ffmpegPath) {
+      return NextResponse.json(
+        { error: "ffmpeg not found on server. Install ffmpeg to use merge download." },
+        { status: 503 }
+      );
+    }
+
+    const videoInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, "video");
+    const audioInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, "audio");
+
+    if (!videoInfo || videoInfo.segmentUrls.length === 0) {
+      return NextResponse.json({ error: "No video segments found in manifest" }, { status: 404 });
+    }
+    if (!audioInfo || audioInfo.segmentUrls.length === 0) {
+      return NextResponse.json({ error: "No audio segments found in manifest" }, { status: 404 });
+    }
+
+    const mergeFilename = `${safeName}_${videoInfo.height > 0 ? `${videoInfo.height}p` : "merged"}.mp4`;
+    const durationMin = Math.round(videoInfo.durationSec / 60);
+    console.log(
+      `Merge: ${contentId} "${title}" — ${videoInfo.width}x${videoInfo.height} ` +
+      `${Math.round(videoInfo.bandwidth / 1000)}kbps · ~${durationMin}min · encrypted=${isEncrypted}`
+    );
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "sunnxt-merge-"));
+    const videoPath = join(tmpDir, "video.mp4");
+    const audioPath = join(tmpDir, "audio.mp4");
+
+    try {
+      console.log(`Merge ${contentId}: collecting tracks…`);
+      const [videoBytes, audioBytes] = await Promise.all([
+        collectTrack(videoInfo, cookie, "video", contentId),
+        collectTrack(audioInfo, cookie, "audio", contentId),
+      ]);
+      await Promise.all([
+        writeFile(videoPath, videoBytes),
+        writeFile(audioPath, audioBytes),
+      ]);
+      console.log(`Merge ${contentId}: running ffmpeg…`);
+    } catch (e) {
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      console.error(`Merge ${contentId}: collect error —`, e);
+      return NextResponse.json({ error: "Failed to download segments for merge" }, { status: 502 });
+    }
+
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+
+    (async () => {
+      const ff = spawn(ffmpegPath, [
+        "-i", videoPath,
+        "-i", audioPath,
+        "-c", "copy",
+        "-movflags", "frag_keyframe+empty_moov",
+        "-f", "mp4",
+        "pipe:1",
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+
+      ff.stderr.on("data", (d: Buffer) => {
+        const line = d.toString().trim();
+        if (line) console.log(`ffmpeg [${contentId}]:`, line.slice(0, 120));
+      });
+
+      ff.stdout.on("data", async (chunk: Buffer) => {
+        try { await writer.write(new Uint8Array(chunk)); } catch { /* writer closed */ }
+      });
+
+      ff.on("close", async (code: number | null) => {
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+        if (code === 0) {
+          console.log(`Merge ${contentId}: complete`);
+          await writer.close().catch(() => {});
+        } else {
+          console.error(`Merge ${contentId}: ffmpeg exited with code ${code}`);
+          await writer.abort(new Error(`ffmpeg exited ${code}`)).catch(() => {});
+        }
+      });
+
+      ff.on("error", async (err: Error) => {
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+        console.error(`Merge ${contentId}: ffmpeg spawn error —`, err);
+        await writer.abort(err).catch(() => {});
+      });
+    })();
+
+    return new Response(readable as ReadableStream, {
+      headers: {
+        "content-type": "video/mp4",
+        "content-disposition": `attachment; filename="${encodeURIComponent(mergeFilename)}"`,
+        "x-encrypted": String(isEncrypted),
+        "x-resolution": videoInfo.width > 0 ? `${videoInfo.width}x${videoInfo.height}` : "unknown",
+        "x-duration-sec": String(Math.round(videoInfo.durationSec)),
+      },
+    });
+  }
 
   const segInfo = parseMpdTrack(mpdXml, mpdBaseDir, qs, track);
 

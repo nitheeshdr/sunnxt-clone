@@ -234,6 +234,16 @@ For a web application security test, DRM is effectively unbreakable. The securit
 
 ## New Findings (May 2026)
 
+### Live Channel DRM Path — modularLicense Returns HDCP-Enforcing Licenses for All Live IDs
+
+A related finding: `modularLicense` returns licenses for live channel content IDs just like VOD, but those licenses unconditionally include `output_protection.hdcp = HDCP_V2`. This applies to **all** live channel content IDs — not just HD channels. The HDCP policy is baked into the Nagravision license template for live content, not conditionally applied based on resolution.
+
+This means:
+- Using `modularLicense` for live channels produces a license that immediately triggers `output-restricted` key status in the browser CDM, even for SD live channels
+- The fix is to route live channel license requests to `nagravisionDRMProxy` instead (via `isLive=1` flag)
+- `nagravisionDRMProxy` returns licenses without the unconditional HDCP requirement for SD live channels
+- HD live channels (`*HDB_IN`) still enforce HDCP_V2 via `nagravisionDRMProxy` because that policy is applied at the channel level in Nagravision's CAS, not at the endpoint level
+
 ### HDCP Output Restriction on Live HD Channels
 
 Live HD channels use Nagravision license policies that include `output_protection.hdcp = HDCP_V2` unconditionally. This was discovered when Shaka error 4012 (`RESTRICTIONS_CANNOT_BE_MET`) appeared for `KTVHDB_IN_index.mpd` and `SunTVHDB_IN_index.mpd` even after configuring Widevine L3 (`SW_SECURE_DECODE`) robustness.
@@ -241,6 +251,20 @@ Live HD channels use Nagravision license policies that include `output_protectio
 **Key discovery:** SW_SECURE_DECODE is a *capability request* — it tells the CDM what the device supports. But the license server can override this and still mandate HDCP regardless. The CDM then reports `output-restricted` because the hardware verification cannot be satisfied in a browser.
 
 **Impact:** HD live channels cannot play in desktop browsers. SD live channels (if available) and all VOD content work fine with the L3 hint.
+
+### FairPlay on Safari / iOS — Format Selection Bug Fixed
+
+The `hls-fp-aapl` stream format was previously never selected on Safari/iOS because the generic HLS selector (`format?.includes("hls")`) would match `hlsaes` entries first, and the player would attempt to play those instead of the FairPlay-specific entry. On Safari, loading an `hlsaes` stream (AES-128 key delivery) fails because Safari's EME implementation expects a `com.apple.fps.1_0` key system session, not a bare AES key URL.
+
+**Fix:** `hls-fp-aapl` is now explicitly matched and placed ahead of the generic HLS fallback in the format priority list.
+
+**FairPlay protocol differences from Widevine/PlayReady:**
+1. Requires a **server certificate** — fetched via `GET` to the license server before any challenge is generated
+2. Uses `com.apple.fps.1_0` as the EME key system identifier
+3. License challenge format is incompatible with Widevine's protobuf — `modularLicense` cannot handle it
+4. License requests must go to `nagravisionDRMProxy` (authenticated) with the `isLive=1` flag to bypass `modularLicense` routing
+
+**Implementation:** The license proxy's GET handler returns the FairPlay server certificate (proxied from Nagravision, with session-cookie fallback). The POST handler handles the license challenge. Shaka is configured with `serverCertificateUri` pointing to the same proxy URL — Shaka calls GET automatically before generating the challenge.
 
 ### pwaapi modularLicense — Unauthenticated Access Confirmed
 
