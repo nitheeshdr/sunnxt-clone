@@ -13,18 +13,18 @@ interface ContentRowProps {
 
 export default function ContentRow({ title, items, layout = "landscape", showViewAll }: ContentRowProps) {
   const rowRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollLeft,  setCanScrollLeft]  = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(true);
 
   const scroll = (dir: "left" | "right") => {
-    if (!rowRef.current) return;
     const el = rowRef.current;
+    if (!el) return;
     el.scrollBy({ left: dir === "right" ? el.clientWidth * 0.8 : -(el.clientWidth * 0.8), behavior: "smooth" });
   };
 
   const onScroll = () => {
-    if (!rowRef.current) return;
     const el = rowRef.current;
+    if (!el) return;
     setCanScrollLeft(el.scrollLeft > 10);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 10);
   };
@@ -32,27 +32,31 @@ export default function ContentRow({ title, items, layout = "landscape", showVie
   if (!items.length) return null;
 
   return (
-    <div className="relative py-2">
-      <div className="flex items-center justify-between mb-3 px-4 sm:px-8 max-w-350 mx-auto">
-        <h2 className="text-white font-bold text-sm sm:text-base md:text-lg">{title}</h2>
+    <div className="relative py-3">
+      {/* Row header */}
+      <div className="flex items-center justify-between mb-3 px-4 sm:px-6 lg:px-10">
+        <h2 className="text-white font-bold text-sm sm:text-[15px]">{title}</h2>
         {showViewAll && (
-          <button className="text-red-400 hover:text-red-300 text-xs sm:text-sm font-medium transition-colors">
+          <button className="text-gray-400 hover:text-white text-xs sm:text-sm font-medium transition-colors">
             View All
           </button>
         )}
       </div>
 
+      {/* Scroll container */}
       <div className="relative group/row">
-        {/* Left arrow — visible on hover (desktop) */}
+        {/* Left arrow */}
         {canScrollLeft && (
           <button
             onClick={() => scroll("left")}
-            className="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-black/80 hover:bg-black text-white p-2 sm:p-3 rounded-r-lg opacity-0 group-hover/row:opacity-100 transition-opacity hidden sm:flex items-center"
+            className="absolute left-0 top-1/2 -translate-y-1/2 z-10 h-full px-2 bg-linear-to-r from-black/80 to-transparent opacity-0 group-hover/row:opacity-100 transition-opacity hidden sm:flex items-center"
             aria-label="Scroll left"
           >
-            <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
+            <div className="bg-black/70 hover:bg-black rounded-full p-2">
+              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
+              </svg>
+            </div>
           </button>
         )}
 
@@ -60,24 +64,26 @@ export default function ContentRow({ title, items, layout = "landscape", showVie
         {canScrollRight && (
           <button
             onClick={() => scroll("right")}
-            className="absolute right-0 top-1/2 -translate-y-1/2 z-10 bg-black/80 hover:bg-black text-white p-2 sm:p-3 rounded-l-lg opacity-0 group-hover/row:opacity-100 transition-opacity hidden sm:flex items-center"
+            className="absolute right-0 top-1/2 -translate-y-1/2 z-10 h-full px-2 bg-linear-to-l from-black/80 to-transparent opacity-0 group-hover/row:opacity-100 transition-opacity hidden sm:flex items-center"
             aria-label="Scroll right"
           >
-            <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
+            <div className="bg-black/70 hover:bg-black rounded-full p-2">
+              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+              </svg>
+            </div>
           </button>
         )}
 
-        {/* Scrollable row */}
+        {/* Scrollable items */}
         <div
           ref={rowRef}
           onScroll={onScroll}
-          className="flex gap-2 sm:gap-3 overflow-x-auto scrollbar-hide px-4 sm:px-8 pb-2 scroll-smooth"
+          className="flex gap-2 sm:gap-3 overflow-x-auto pb-2 px-4 sm:px-6 lg:px-10 scroll-smooth"
           style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
           {items.map((item, idx) => (
-            <ContentCard key={item._id} item={item} layout={layout} size="md" priority={idx < 4} />
+            <ContentCard key={item._id} item={item} layout={layout} size="md" priority={idx < 5} />
           ))}
         </div>
       </div>
