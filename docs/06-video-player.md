@@ -35,6 +35,10 @@ if (!shaka.Player.isBrowserSupported()) {
 // Destroy previous instance if exists
 if (playerRef.current) await playerRef.current.destroy();
 
+// Reset CDM state so output-restricted key status from the previous session
+// doesn't leak into this new player instance (causes spurious 4032 errors)
+try { await videoRef.current.setMediaKeys(null); } catch { /* best effort */ }
+
 const player = new shaka.Player();
 await player.attach(videoRef.current); // Connect to <video> element
 playerRef.current = player;

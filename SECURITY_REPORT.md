@@ -11,7 +11,7 @@
 | **Scope** | sunnxt.com — Web App, REST APIs, CDN, DRM Infrastructure |
 | **Test Period** | May 2026 |
 | **Report Date** | May 23, 2026 |
-| **Report Version** | 2.0 — Final (Updated with 20 findings) |
+| **Report Version** | 2.1 — Updated with post-harvest findings and DRM live channel analysis |
 | **Classification** | Confidential — For SunNXT Security Team Only |
 
 ---
@@ -1000,4 +1000,40 @@ This report was prepared for responsible disclosure to the SunNXT security team.
 
 ---
 
-*Report prepared by Nitheesh D R — May 23, 2026*
+## 12. Post-Harvest Findings (Addendum — May 2026)
+
+These findings emerged from large-scale automated testing following the initial assessment.
+
+### A. UUID Harvest Scale Confirmation
+
+The VULN-20 UUID bypass was validated at scale: 9,950 content IDs were processed in a single harvest run. **478 new UUIDs** were learned and persisted, growing the UUID database from 58 to 536 entries. Each entry enables permanent, subscription-free content access via the CDN UUID + hdntl bypass chain. The harvest used only public browse and search endpoints (no subscription required for discovery) and the pwaapi contentDetail endpoint for UUID extraction.
+
+### B. pwaapi Unauthenticated Access — Scope Extended
+
+`pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` was confirmed to return valid binary Widevine licenses **without any session cookie** for the majority of content IDs tested. This extends VULN-11 beyond the originally documented scope: not only does the endpoint have no subscription check, it has **no authentication requirement at all**. Any HTTP client can obtain Widevine decryption keys for SunNXT content by sending a Widevine license challenge with only a `content_id` parameter.
+
+Additionally, `pwaapi.sunnxt.com/content/v3/contentDetail/<id>/` was confirmed to return complete stream URLs (including CDN paths with embedded hdntl tokens) **without any session cookie** for many content IDs. This means UUID and hdntl bypass data can be harvested entirely without a SunNXT account.
+
+### C. Session Rate-Limiting Asymmetry
+
+After high-volume API requests (~10,000 in a session), SunNXT's main API (`www.sunnxt.com/next/api/`) returns `ERR_CLIENT_NOT_ALLOWED` (HTTP 400) for all subsequent requests. The block lasts approximately 1 hour. However, `pwaapi.sunnxt.com` is **not co-rate-limited** — requests to pwaapi without any session cookie continue to succeed during main API blocks. This means the bypass path cannot be shut down by blocking the main API session alone.
+
+### D. Shaka 5.x DRM Configuration Change (Implementation Note)
+
+Shaka Player 5.x changed the type of `videoRobustness` and `audioRobustness` in `drm.advanced` from `string` to `string[]`. Passing a plain string now silently causes "Invalid config, wrong type" and DRM initialisation fails with a false-negative error. This is a breaking change from Shaka 4.x with no deprecation warning.
+
+Additionally, Shaka 5 added top-level `defaultVideoRobustnessForWidevine` and `defaultAudioRobustnessForWidevine` as a simpler alternative to the per-key-system `advanced` config.
+
+### E. Live HD Channels — HDCP Enforcement Confirmed Hard
+
+SunNXT's Nagravision license server unconditionally sets `output_protection.hdcp = HDCP_V2` in licenses for live HD channels (`*HDB_IN_index.mpd`). Configuring Widevine L3 (`SW_SECURE_DECODE`) robustness does not change this — the license server ignores the robustness hint for live content and always mandates HDCP. Desktop browsers cannot satisfy HDCP hardware verification, so the CDM reports `output-restricted` key status and playback fails (Shaka 4012). This is the only SunNXT content category where the subscription bypass chain does not produce playable output in a browser.
+
+### F. CDM State Leakage — Chrome Browser Behaviour
+
+When `HTMLMediaElement.setMediaKeys()` is not explicitly called with `null` after `shaka.Player.destroy()`, Chrome retains the previous MediaKeys session on the `<video>` element. A new Shaka Player attached to the same element inherits any existing key status. If the previous session had `output-restricted` keys, the new instance's stream filter immediately removes all variants (Shaka 4032) without requesting a new license. This makes format-fallback logic appear broken when only one format has HDCP issues — the second format also fails because of stale CDM state from the first.
+
+**Fix:** `await videoElement.setMediaKeys(null)` between player instances.
+
+---
+
+*Report prepared by Nitheesh D R — May 23, 2026. Addendum added May 23, 2026.*

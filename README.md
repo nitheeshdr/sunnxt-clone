@@ -31,6 +31,8 @@ A fully functional clone of the [SunNXT](https://www.sunnxt.com) streaming platf
 | Auto Login | Server-side session with automatic refresh + device-limit bypass |
 | Heartbeat | Tracks watch sessions (Start/Stop events every 30s) |
 | CDN Bypass | 3-path subscription bypass system with hdntl token persistence |
+| UUID Harvest | Auto-discovers and persists content UUIDs (536+ in DB) for instant bypass |
+| Session Recovery | Auto-retries pwaapi unauthenticated when main API session is rate-limited |
 
 ---
 
@@ -173,7 +175,14 @@ sunnxt-clone/
 
 **The most critical chain:** VULN-06 (wildcard CDN token) + VULN-11 (no DRM auth) + VULN-12 (permanent UUIDs) = complete premium content access without any subscription.
 
-See [SECURITY_REPORT.md](SECURITY_REPORT.md) for the full report with CVSS scores, PoC, and remediation.
+**Post-harvest findings (May 2026):**
+- `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` confirmed to work with **zero authentication** — no session cookie, no JWT, no account required
+- `pwaapi.sunnxt.com/content/v3/contentDetail/` also works unauthenticated — UUID harvest requires no SunNXT account
+- UUID database harvested to 536 entries in a single 10k-ID run
+- Live HD channels (KTVHDB, SunTVHDB) have hard HDCP enforcement in Nagravision license policy — browser playback not possible regardless of DRM config
+- Shaka 5.x breaking change: `videoRobustness`/`audioRobustness` in `advanced` must be `string[]`, not `string`
+
+See [SECURITY_REPORT.md](SECURITY_REPORT.md) for the full report with CVSS scores, PoC, remediation, and the May 2026 addendum.
 
 ---
 

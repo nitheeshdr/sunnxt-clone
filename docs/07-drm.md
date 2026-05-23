@@ -194,26 +194,32 @@ if (isDrm && currentVideoRef.current) {
 
 ---
 
-## Configuring DRM in Shaka
+## Configuring DRM in Shaka 5.x
+
+**Breaking change in Shaka 5.x:** `videoRobustness` and `audioRobustness` inside `advanced` must be `string[]` (arrays), not plain strings. Passing a string silently causes "Invalid config, wrong type" and DRM fails to initialise.
 
 ```typescript
-if (video.licenseUrl) {
-  const proxyLicenseUrl = `/api/license?url=${encodeURIComponent(video.licenseUrl)}`;
-
-  // dash-cenc is PlayReady-only (suntvvod1.sunnxt.com CDN)
-  // All other DRM formats try Widevine first (Chrome/Android compatible)
-  const isPlayReadyOnly = video.format === "dash-cenc";
-
-  player.configure({
-    drm: {
-      servers: {
-        ...(isPlayReadyOnly ? {} : { "com.widevine.alpha": proxyLicenseUrl }),
-        "com.microsoft.playready": proxyLicenseUrl,
+player.configure({
+  drm: {
+    servers: {
+      "com.widevine.alpha": proxyLicenseUrl,
+      "com.microsoft.playready": proxyLicenseUrl,
+    },
+    // Shaka 5.x top-level robustness shorthand (simpler than advanced)
+    defaultVideoRobustnessForWidevine: "SW_SECURE_DECODE",
+    defaultAudioRobustnessForWidevine: "SW_SECURE_CRYPTO",
+    // advanced must also be arrays in Shaka 5.x (was strings in 4.x)
+    advanced: {
+      "com.widevine.alpha": {
+        videoRobustness: ["SW_SECURE_DECODE"],  // ← must be string[], NOT string
+        audioRobustness: ["SW_SECURE_CRYPTO"],
       },
     },
-  });
-}
+  },
+});
 ```
+
+**Why SW_SECURE_DECODE (Widevine L3)?** Requesting L3 tells the Nagravision license server to issue a key without mandatory HDCP output protection. Without this hint, some license responses include `output_protection.hdcp = HDCP_V2`, causing the browser's Widevine CDM to report `output-restricted` key status — Shaka then throws error 4012 (`RESTRICTIONS_CANNOT_BE_MET`) and filters all stream variants.
 
 ---
 
@@ -231,6 +237,55 @@ Desktop Chrome uses **Widevine L3**. This means:
 - SunNXT's license server may cap HD content to 720p or 480p on desktop
 - The license server decides the quality — our proxy just relays the challenge
 - Mobile devices with L1 Widevine can receive 1080p/4K licenses
+
+---
+
+## HDCP Output Protection — Live HD Channels
+
+**Live HD channels** (`KTVHDB_IN_index.mpd`, `SunTVHDB_IN_index.mpd`, etc.) have a **hard HDCP enforcement policy** set at the Nagravision license level. This is independent of Widevine robustness level:
+
+```
+Widevine CDM (browser)
+  ↓ receives license with output_protection.hdcp = HDCP_V2
+  ↓ checks display connection for HDCP compliance
+  ↓ browser cannot verify HDCP (no hardware path)
+  → reports key status = "output-restricted"
+Shaka sees output-restricted → filters all variants → error 4012 (RESTRICTIONS_CANNOT_BE_MET)
+```
+
+**SW_SECURE_DECODE does NOT help here.** The HDCP requirement is baked into the license policy by Nagravision — it is not negotiated by robustness level. The CDM will always report `output-restricted` for these channels in a browser context.
+
+**What works:** Dedicated apps on Android TV, Chromecast, or smart TVs that have a hardware-verified HDCP display path. Desktop browsers cannot satisfy this requirement.
+
+**Shaka error sequence for live HD channels:**
+1. Format 1 (`dash-cenc`) loads → 4012 fires from DRM event listener
+2. Player marks `dash-cenc` as failed, retries with format 2
+3. Without `setMediaKeys(null)` reset between instances, `output-restricted` CDM state leaks into the new Shaka instance → 4032 (`NO_STREAMS_PLAYABLE`) fires immediately during manifest filtering
+
+**Fix:** Call `await videoElement.setMediaKeys(null)` after `player.destroy()` and before creating the replacement player to clear residual CDM sessions between format fallback attempts.
+
+---
+
+## CDM State Leakage Between Shaka Instances
+
+When the same `<video>` element is reused across multiple `shaka.Player` instances (the common pattern for format fallback), the browser may retain the `MediaKeys` object from the previous player. Any key status set by the previous CDM session (including `output-restricted`) can survive `player.destroy()` and cause premature stream filtering in the next instance.
+
+**Pattern:**
+
+```typescript
+// ❌ CDM state from first player leaks into second
+await firstPlayer.destroy();
+const secondPlayer = new shaka.Player();
+await secondPlayer.attach(videoElement); // MediaKeys still attached!
+
+// ✅ Reset CDM session explicitly
+await firstPlayer.destroy();
+try { await videoElement.setMediaKeys(null); } catch { /* best effort */ }
+const secondPlayer = new shaka.Player();
+await secondPlayer.attach(videoElement); // Clean slate
+```
+
+This matters particularly when the first format fails with a key status error (4012) and the second format uses the same key system (Widevine). The CDM may immediately report `output-restricted` for the second manifest's keys without contacting the license server again — causing 4032 instead of the expected 4012.
 
 ---
 

@@ -221,13 +221,45 @@ For a web application security test, DRM is effectively unbreakable. The securit
 2. **No clear stream fallback** — no unencrypted streams available for premium content
 3. **Short-lived Akamai tokens** — CDN URLs expire in 2–8 hours
 4. **JWT validation** — Nagravision validates content_id, userId, expiry
+5. **HDCP enforcement on live HD** — live channel licenses mandate HDCP_V2, effectively blocking browser-only playback of HD live streams
 
 ## What Could Be Improved
 
 1. **Widevine L1 enforcement** — currently L3 (software) is accepted; could enforce L1 for premium content
 2. **IP binding in DRM JWT** — currently bound to server IP, not browser IP (VULN-08)
 3. **maxUses: 2** — reducing to 1 would prevent the reuse window
-4. **Output protection** — enforce HDCP for premium playback
+4. **modularLicense auth** — `pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/` issues valid Widevine keys without any subscription check (VULN-11)
+
+---
+
+## New Findings (May 2026)
+
+### HDCP Output Restriction on Live HD Channels
+
+Live HD channels use Nagravision license policies that include `output_protection.hdcp = HDCP_V2` unconditionally. This was discovered when Shaka error 4012 (`RESTRICTIONS_CANNOT_BE_MET`) appeared for `KTVHDB_IN_index.mpd` and `SunTVHDB_IN_index.mpd` even after configuring Widevine L3 (`SW_SECURE_DECODE`) robustness.
+
+**Key discovery:** SW_SECURE_DECODE is a *capability request* — it tells the CDM what the device supports. But the license server can override this and still mandate HDCP regardless. The CDM then reports `output-restricted` because the hardware verification cannot be satisfied in a browser.
+
+**Impact:** HD live channels cannot play in desktop browsers. SD live channels (if available) and all VOD content work fine with the L3 hint.
+
+### pwaapi modularLicense — Unauthenticated Access Confirmed
+
+`https://pwaapi.sunnxt.com/licenseproxy/v3/modularLicense/?content_id=<id>` returns valid binary Widevine licenses with **no authentication required** for most VOD content IDs. Live channel IDs also return licenses, but those licenses include HDCP requirements (see above).
+
+Testing confirmed:
+- No session cookie required
+- No subscription check
+- No JWT token required
+- Returns the same binary license as an authenticated request
+- ONLY exception: a small subset of content IDs return a JSON error body instead of binary license
+
+### Session Rate-Limiting (ERR_CLIENT_NOT_ALLOWED)
+
+After large-scale harvest operations (~10,000 API requests), SunNXT's main API (`www.sunnxt.com/next/api/media/`) begins returning `{ "code": 400, "status": "ERR_CLIENT_NOT_ALLOWED" }` for ALL requests from the flagged session. This persists for approximately 1 hour. The pwaapi endpoint is NOT simultaneously rate-limited — requests to `pwaapi.sunnxt.com` without any session cookie continue to succeed. This asymmetry allows bypass path 3 (pwaapi contentDetail) to serve content even during main API blocks.
+
+### CDM State Leakage — Browser Bug/Behaviour
+
+When `player.destroy()` is called on a Shaka Player instance, the underlying `MediaKeys` may not be fully detached from the `<video>` element until `videoElement.setMediaKeys(null)` is called explicitly. In Chrome, a subsequent Shaka Player attached to the same element inherits the previous CDM's key statuses. If the previous session had `output-restricted` keys, Shaka's stream filter in the new instance immediately filters all variants (4032) without ever requesting a new license. Calling `setMediaKeys(null)` between instances prevents this.
 
 ---
 
